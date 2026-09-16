@@ -1,0 +1,20 @@
+# Runtime/private data
+reports/
+logs/
+libs/
+_wheels/
+__pycache__/
+*.py[cod]
+calibration.json
+ratings.csv
+
+# Local environments
+.venv/
+venv/
+.env
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
