@@ -1,0 +1,5 @@
+pywinauto==0.6.9
+comtypes==1.2.1
+pywin32==312
+Pillow==12.3.0
+six==1.17.0
