@@ -3,15 +3,20 @@ setlocal enableextensions
 cd /d "%~dp0"
 
 echo ============================================================
-echo WOWKIDS DEVELOPMENT TEST - current guarded stage
+echo WOWKIDS NEXT GUARDED TEST - remaining four categories
 echo ============================================================
 echo.
-echo This launcher updates itself from GitHub before every run.
-echo Current stage may change ratings on the student currently open.
+echo Making Skills score 4 was already verified in the previous test.
+echo This stage will test ONLY:
+echo   Problem Solving = 4
+echo   Theory ^& Application = 4
+echo   Creative Thinking = 3
+echo   Interpersonal Skills = 5
+echo.
 echo It will NOT click Submit or Post All.
 echo Press ESC at any time to abort the Python stage.
 echo.
-echo Keep WOWKIDS on the rating form and visible.
+echo Keep WOWKIDS on the SAME student's rating form and visible.
 echo.
 pause
 
@@ -41,7 +46,7 @@ if not exist "libs\pywinauto" (
 )
 
 echo.
-%PYEXE% select_making_score_test.py
+%PYEXE% test_remaining_categories.py
 set "RC=%ERRORLEVEL%"
 echo.
 if "%RC%"=="0" (
