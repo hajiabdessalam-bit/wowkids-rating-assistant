@@ -998,3 +998,19 @@ def capture_window(wrapper, path: str) -> str:
             mode = "BitBlt"
             screen_dc.DeleteDC()
             win32gui.ReleaseDC(win32gui.GetDesktopWindow(), desktop_dc)
+
+        saved = _bitmap_to_png(bits, width, height, path)
+        if not saved:
+            bmp_path = os.path.splitext(path)[0] + ".bmp"
+            bitmap.SaveBitmapFile(save_dc, bmp_path)
+            path = bmp_path
+            mode += "+BMP"
+
+        save_dc.DeleteDC()
+        mfc_dc.DeleteDC()
+        win32gui.ReleaseDC(handle, window_dc)
+        black = _looks_black(bits, width, height)
+        return "{} {}{}".format(
+            mode, "BLACK?" if black else "ok", " -> " + os.path.basename(path))
+    except Exception as exc:
+        return "capture failed: {}".format(exc)
