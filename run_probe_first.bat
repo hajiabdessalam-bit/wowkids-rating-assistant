@@ -15,6 +15,11 @@ if not defined PYEXE (
   exit /b 1
 )
 
+if exist "repair_wkcommon.py" (
+  %PYEXE% repair_wkcommon.py
+  if errorlevel 1 goto fail
+)
+
 if not exist "libs\pywinauto" (
   echo First run - fetching the required libraries...
   %PYEXE% _fetch_libs.py
@@ -31,6 +36,6 @@ exit /b 0
 
 :fail
 echo.
-echo Library setup failed - see the messages above.
+echo Setup failed - see the messages above.
 pause
 exit /b 1
