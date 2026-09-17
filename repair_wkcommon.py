@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# One-time compatibility repair for clones made while wkcommon.py was truncated.
 PATH = Path(__file__).with_name("wkcommon.py")
 TAIL_MARKER = "win32gui.ReleaseDC(win32gui.GetDesktopWindow(), desktop_dc)"
 COMPLETE_MARKER = 'return "capture failed: {}".format(exc)'
