@@ -44,6 +44,17 @@ def _making_section(selected, client_rect):
     }
 
 
+def _safe_visual_band_bottom(client_rect):
+    if not client_rect:
+        return None
+    return (
+        client_rect["top"]
+        + client_rect["height"]
+        - wkcommon.BOTTOM_EXCLUSION_BAND
+        - 4
+    )
+
+
 def main() -> int:
     wkcommon.enable_utf8_stdout()
     wkcommon.bootstrap_libs()
@@ -145,34 +156,51 @@ def main() -> int:
     emit("post shot: {}".format(wkcommon.capture_window(wrapper, post_shot)))
     nodes_after = wkcommon.walk_described(wrapper, 8000)
     visible_after = _visible(nodes_after, client_rect)
+
+    # The full-form classifier is useful diagnostics, but expanding a section
+    # can move enough headings that the strict whole-page rule becomes UNKNOWN.
+    # Do not treat UNKNOWN alone as page navigation. Instead require the page to
+    # have been a verified RATING_FORM before the click, then visually verify the
+    # same Making Skills heading plus the unique 1..5 star/radio pattern after.
     state_after, reasons_after, _signals_after = ctx.classify_live_page(
         visible_after, None, post_shot, window_rect)
-    emit("page after: {}".format(state_after))
+    emit("page after (diagnostic): {}".format(state_after))
     for item in reasons_after:
         emit("  - {}".format(item))
-    if state_after != "RATING_FORM":
-        emit("ABORT: page changed or could not be verified after accordion action.")
-        with open(text_path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
-        print("Post-click page not verified as RATING_FORM. No rating was selected.")
-        print("REPORT: {}".format(text_path))
-        return 6
 
     selected_after, support_after = _visual_headings(
         nodes_after, client_rect, post_shot, window_rect)
+    making_after = selected_after.get("Making Skills")
+    making_support = support_after.get("Making Skills", {})
+    making_supported = bool(making_after and making_support.get("supported"))
+    emit("Making heading visually supported after: {}".format(making_supported))
+
+    post_heading_rect = (
+        making_after.get("rect")
+        if making_after and making_after.get("rect")
+        else heading_rect
+    )
+
     section_after = _making_section(selected_after, client_rect)
-    if not section_after:
-        emit("ABORT: could not rebuild Making Skills section after expansion.")
+    if section_after:
+        band_bottom = section_after["band_bottom"]
+        emit("post band bottom from Problem Solving heading: {}".format(int(band_bottom)))
+    else:
+        band_bottom = _safe_visual_band_bottom(client_rect)
+        emit("post band bottom fallback (safe client limit): {}".format(
+            int(band_bottom) if band_bottom is not None else None))
+
+    if not making_supported or band_bottom is None:
+        emit("ABORT: Making Skills heading was not visually verified after expansion.")
         with open(text_path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
-        print("Post-click Making Skills geometry not verified.")
+        print("Post-click Making Skills heading not visually verified. No rating was selected.")
         print("REPORT: {}".format(text_path))
-        return 7
+        return 6
 
     after = detect_visual_score_rows(
-        post_shot, window_rect, section_after["heading"]["rect"],
-        section_after["band_bottom"], client_rect,
-        wkcommon.BOTTOM_EXCLUSION_BAND)
+        post_shot, window_rect, post_heading_rect,
+        band_bottom, client_rect, wkcommon.BOTTOM_EXCLUSION_BAND)
     emit("after visual rows: {} ({})".format(after["layout"], after["reason"]))
     for row in after.get("rows", []):
         emit("  score {} -> click {} stars={} radio={}".format(
@@ -183,7 +211,8 @@ def main() -> int:
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "clicked_accordion": clicked,
         "page_before": state,
-        "page_after": state_after,
+        "page_after_diagnostic": state_after,
+        "making_heading_supported_after": making_supported,
         "heading_support_before": support,
         "heading_support_after": support_after,
         "before": before,
@@ -208,7 +237,7 @@ def main() -> int:
         print("REPORT: {}".format(text_path))
         return 0
 
-    print("Making Skills expanded action completed, but visual 1..5 score rows were NOT verified.")
+    print("Making Skills expanded, but visual 1..5 score rows were NOT verified.")
     print("No rating was selected.")
     print("REPORT: {}".format(text_path))
     return 8
