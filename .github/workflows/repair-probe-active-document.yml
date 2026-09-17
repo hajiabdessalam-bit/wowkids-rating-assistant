@@ -1,0 +1,33 @@
+name: Repair probe active document
+
+on:
+  push:
+    paths:
+      - 'repair_probe_active_document.py'
+      - '.github/workflows/repair-probe-active-document.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch probe
+        run: python repair_probe_active_document.py
+      - name: Commit repaired probe
+        run: |
+          if git diff --quiet -- probe_sections.py; then
+            echo "No probe patch needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add probe_sections.py
+          git commit -m "Fix probe to isolate active rating document"
+          git push
