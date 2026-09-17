@@ -3,20 +3,22 @@ setlocal enableextensions
 cd /d "%~dp0"
 
 echo ============================================================
-echo WOWKIDS NEXT GUARDED TEST - remaining four categories
+echo WOWKIDS NEXT GUARDED TEST - resume after Problem Solving
 echo ============================================================
 echo.
-echo Making Skills score 4 was already verified in the previous test.
-echo This stage will test ONLY:
-echo   Problem Solving = 4
+echo Making Skills and Problem Solving are already done.
+echo This stage will continue with:
 echo   Theory ^& Application = 4
 echo   Creative Thinking = 3
 echo   Interpersonal Skills = 5
 echo.
+echo It can scroll the rating form automatically when a category is too low.
 echo It will NOT click Submit or Post All.
-echo Press ESC at any time to abort the Python stage.
+echo If a category succeeds and a later one fails, progress is saved so the
+ echo next run resumes instead of repeating completed categories.
 echo.
 echo Keep WOWKIDS on the SAME student's rating form and visible.
+echo Press ESC at any time to abort the Python stage.
 echo.
 pause
 
@@ -46,7 +48,7 @@ if not exist "libs\pywinauto" (
 )
 
 echo.
-%PYEXE% test_remaining_categories.py
+%PYEXE% test_after_problem.py
 set "RC=%ERRORLEVEL%"
 echo.
 if "%RC%"=="0" (
