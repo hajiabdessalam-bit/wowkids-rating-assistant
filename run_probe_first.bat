@@ -26,9 +26,10 @@ if not exist "libs\pywinauto" (
   if errorlevel 1 goto fail
 )
 
-echo Making Skills expansion probe - expands at most one header, selects nothing.
+echo Making Skills VISUAL probe - expands at most one header, selects nothing.
+echo It ignores stale UIA roster/calendar rows and verifies the real 1..5 stars from pixels.
 echo.
-%PYEXE% probe_sections.py --sections first
+%PYEXE% probe_visual_first.py
 echo.
 echo Report in "reports", screenshots in "reports\shots".
 pause
