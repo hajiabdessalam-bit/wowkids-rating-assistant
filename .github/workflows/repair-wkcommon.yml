@@ -1,0 +1,43 @@
+name: Repair wkcommon source
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Repair truncated tail if needed
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('wkcommon.py')
+          text = p.read_text(encoding='utf-8')
+          complete = 'return "capture failed: {}".format(exc)'
+          marker = 'win32gui.ReleaseDC(win32gui.GetDesktopWindow(), desktop_dc)'
+          if complete in text:
+              print('wkcommon.py already complete')
+              raise SystemExit(0)
+          if not text.rstrip().endswith(marker):
+              raise SystemExit('wkcommon.py is incomplete at an unexpected location')
+          tail = '''\n\n        saved = _bitmap_to_png(bits, width, height, path)\n        if not saved:\n            bmp_path = os.path.splitext(path)[0] + ".bmp"\n            bitmap.SaveBitmapFile(save_dc, bmp_path)\n            path = bmp_path\n            mode += "+BMP"\n\n        save_dc.DeleteDC()\n        mfc_dc.DeleteDC()\n        win32gui.ReleaseDC(handle, window_dc)\n        black = _looks_black(bits, width, height)\n        return "{} {}{}".format(\n            mode, "BLACK?" if black else "ok", " -> " + os.path.basename(path))\n    except Exception as exc:\n        return "capture failed: {}".format(exc)\n'''
+          p.write_text(text.rstrip() + tail, encoding='utf-8')
+          print('wkcommon.py repaired')
+      - name: Commit repair
+        shell: bash
+        run: |
+          if git diff --quiet -- wkcommon.py; then
+            echo "No repair commit needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add wkcommon.py
+          git commit -m "Complete truncated wkcommon source"
+          git push
