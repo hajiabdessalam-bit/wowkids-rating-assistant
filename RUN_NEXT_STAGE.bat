@@ -3,14 +3,15 @@ setlocal enableextensions
 cd /d "%~dp0"
 
 echo ============================================================
-echo WOWKIDS NEXT SAFE TEST - select Making Skills score 4 only
+echo WOWKIDS DEVELOPMENT TEST - current guarded stage
 echo ============================================================
 echo.
-echo This test WILL select score 4 in Making Skills on the CURRENT student.
-echo It will NOT submit and will NOT touch the other four categories.
+echo This launcher updates itself from GitHub before every run.
+echo Current stage may change ratings on the student currently open.
+echo It will NOT click Submit or Post All.
+echo Press ESC at any time to abort the Python stage.
 echo.
 echo Keep WOWKIDS on the rating form and visible.
-echo Making Skills may be collapsed or already expanded.
 echo.
 pause
 
