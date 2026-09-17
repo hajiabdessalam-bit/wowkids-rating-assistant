@@ -1,0 +1,36 @@
+name: Repair validate_context source
+
+on:
+  push:
+    paths:
+      - '.github/workflows/repair-validate-context.yml'
+      - 'repair_validate_context.py'
+      - '.repair-validate-trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore last known good classifier and apply hardening patch
+        run: |
+          git show d63078d6ed3a42d7e962d2af7ea317727b364eb3:validate_context.py > validate_context.py
+          python repair_validate_context.py
+          python -m py_compile validate_context.py
+      - name: Commit repaired classifier
+        run: |
+          if git diff --quiet -- validate_context.py; then
+            echo 'No validate_context changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add validate_context.py
+          git commit -m 'Repair live rating-page classifier'
+          git push
