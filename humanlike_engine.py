@@ -129,6 +129,21 @@ class HumanLikeRatingSession(_BaseSession):
                 continue
             items.append((category, node))
         items.sort(key=lambda pair: pair[1]["rect"]["top"])
+
+        # A stale Chromium frame can occasionally place a different category's
+        # UIA rectangle over the same orange heading. Never let two category
+        # names claim the same rendered heading band.
+        for index in range(len(items) - 1):
+            name_a, node_a = items[index]
+            name_b, node_b = items[index + 1]
+            top_a = node_a["rect"]["top"]
+            top_b = node_b["rect"]["top"]
+            if abs(top_a - top_b) <= 18:
+                raise RuntimeError(
+                    "ambiguous live heading: {} and {} overlap the same visual row".format(
+                        name_a, name_b
+                    )
+                )
         return items
 
     def _scroll_to_top(self):
