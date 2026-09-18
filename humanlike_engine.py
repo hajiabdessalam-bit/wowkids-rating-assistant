@@ -106,7 +106,8 @@ class HumanLikeRatingSession(_BaseSession):
 
     Therefore this engine discovers the abilities actually rendered on the
     current lesson and never assumes fixed card heights or a fixed 5-category
-    form.  It deliberately contains NO Submit action.
+    form. Submit is available only through an explicit verified method that
+    requires every discovered ability to have succeeded first.
     """
 
     def park_mouse(self):
@@ -483,3 +484,110 @@ class HumanLikeRatingSession(_BaseSession):
         """Return the visible Submit rectangle; this method NEVER clicks it."""
         snap = self.snapshot("submit_probe")
         return _orange_submit_button(snap["path"], self.window_rect), snap
+
+    def _classify_snapshot(self, snap):
+        visible = self._visible(snap["nodes"])
+        return ctx.classify_live_page(
+            visible, None, snap["path"], self.window_rect
+        )
+
+    def submit_verified_student(self, categories, results, timeout=8.0):
+        """Submit exactly once, but only after a fully verified fill.
+
+        Safety gates:
+          * one successful result for every discovered category;
+          * category order must match exactly;
+          * every score click must have passed the visual-change check;
+          * the target must be the large rating-form Submit button, never the
+            much smaller roster Post All button;
+          * after clicking, the app must return to a visually verified roster.
+        """
+        if abort_pressed():
+            raise RuntimeError("STOP pressed (ESC/F10)")
+
+        expected = list(categories)
+        actual = [item.get("category") for item in results]
+        if actual != expected:
+            raise RuntimeError(
+                "refusing Submit: verified result categories do not match the lesson"
+            )
+        if len(results) != len(expected) or not expected:
+            raise RuntimeError(
+                "refusing Submit: not every discovered ability was verified"
+            )
+        for item in results:
+            change = item.get("visual_change") or {}
+            if not change.get("ok"):
+                raise RuntimeError(
+                    "refusing Submit: {} has no verified selected-state change".format(
+                        item.get("category", "unknown ability")
+                    )
+                )
+
+        # fill_discovered already seeks the bottom, but re-check the live page
+        # instead of reusing an old rectangle.
+        submit_rect = None
+        submit_snap = None
+        for _ in range(6):
+            if abort_pressed():
+                raise RuntimeError("STOP pressed (ESC/F10)")
+            snap = self.snapshot("submit_live_check")
+            rect = _orange_submit_button(snap["path"], self.window_rect)
+            if rect:
+                submit_rect, submit_snap = rect, snap
+                break
+            self._scroll(-3, settle=0.20)
+
+        if not submit_rect:
+            raise RuntimeError("refusing Submit: large orange Submit button not found")
+
+        # Guard against accidentally treating the small orange Post All roster
+        # button as Submit.
+        if submit_rect["width"] < 280 or submit_rect["height"] < 20:
+            raise RuntimeError("refusing Submit: orange target is not the large form button")
+
+        cx = submit_rect["left"] + submit_rect["width"] // 2
+        cy = submit_rect["top"] + submit_rect["height"] // 2
+        if not (
+            self.client_rect["left"] + 30 <= cx
+            < self.client_rect["left"] + self.client_rect["width"] - 30
+            and self.client_rect["top"] + 80 <= cy
+            < self.client_rect["top"] + self.client_rect["height"] - 20
+        ):
+            raise RuntimeError("refusing Submit: button centre is outside the safe client")
+
+        if abort_pressed():
+            raise RuntimeError("STOP pressed (ESC/F10)")
+
+        self.mouse.click(button="left", coords=(cx, cy))
+
+        deadline = time.monotonic() + float(timeout)
+        last_state = "UNKNOWN"
+        last_reasons = []
+        attempt = 0
+        while time.monotonic() < deadline:
+            if abort_pressed():
+                raise RuntimeError("STOP pressed (ESC/F10)")
+            time.sleep(0.40)
+            attempt += 1
+            snap = self.snapshot("after_submit_{:02d}".format(attempt))
+            state, reasons, _signals = self._classify_snapshot(snap)
+            last_state = state
+            last_reasons = reasons
+            if state == "CLASS_ROSTER":
+                return {
+                    "clicked": True,
+                    "point": [int(cx), int(cy)],
+                    "submit_rect": submit_rect,
+                    "verified_return_to_roster": True,
+                    "state": state,
+                    "reasons": reasons,
+                    "snapshot": snap["path"],
+                }
+
+        raise RuntimeError(
+            "Submit was clicked but return to roster was not verified "
+            "(last state: {}; {})".format(
+                last_state, "; ".join(last_reasons) if last_reasons else "no reason"
+            )
+        )
