@@ -96,6 +96,42 @@ def _orange_submit_button(screenshot_path, window_rect):
     return candidates[0]
 
 
+def _centre_toast_change(before_path, after_path, window_rect, client_rect):
+    """Detect the large central success toast shown after a real Submit.
+
+    The human demonstration shows WOWKIDS briefly renders a translucent square
+    with a check mark and 成功 in the middle of the form.  We do not OCR it;
+    we only require a strong visual change in a central area that does not
+    include the orange Submit button itself.
+    """
+    try:
+        from PIL import Image, ImageChops, ImageStat
+
+        a = Image.open(before_path).convert("RGB")
+        b = Image.open(after_path).convert("RGB")
+    except Exception:
+        return False
+
+    cx = client_rect["left"] + client_rect["width"] // 2 - window_rect["left"]
+    cy = client_rect["top"] + int(client_rect["height"] * 0.52) - window_rect["top"]
+    half_w = min(125, client_rect["width"] // 4)
+    half_h = 120
+    box = (
+        max(0, int(cx - half_w)),
+        max(0, int(cy - half_h)),
+        min(a.width, int(cx + half_w)),
+        min(a.height, int(cy + half_h)),
+    )
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return False
+
+    diff = ImageChops.difference(a.crop(box), b.crop(box))
+    stat = ImageStat.Stat(diff)
+    mean = sum(stat.mean) / 3.0
+    extrema = diff.getbbox()
+    return bool(extrema and mean >= 4.0)
+
+
 class HumanLikeRatingSession(_BaseSession):
     """Rating-form driver learned from a human demonstration.
 
@@ -510,169 +546,169 @@ class HumanLikeRatingSession(_BaseSession):
             "verified": bool(has_post_all and len(badges) >= 1),
         }
 
-    def submit_verified_student(self, categories, results, timeout=8.0):
-        """Submit exactly once, but only after a fully verified fill.
+    def submit_verified_student(self, categories, results, timeout=10.0):
+        """Submit the current student's verified ratings automatically.
 
-        Safety gates:
-          * one successful result for every discovered category;
-          * category order must match exactly;
-          * every score click must have passed the visual-change check;
-          * the target must be the large rating-form Submit button, never the
-            much smaller roster Post All button;
-          * after clicking, the app must return to a visually verified roster.
+        Post All is structurally forbidden here: the only clickable orange
+        target must be the very wide form Submit button (>=70% of client width).
+        The small roster Post All button can never pass that geometry gate.
         """
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
 
         expected = list(categories)
         actual = [item.get("category") for item in results]
-        if actual != expected:
-            raise RuntimeError(
-                "refusing Submit: verified result categories do not match the lesson"
-            )
-        if len(results) != len(expected) or not expected:
+        if actual != expected or len(results) != len(expected) or not expected:
             raise RuntimeError(
                 "refusing Submit: not every discovered ability was verified"
             )
         for item in results:
-            change = item.get("visual_change") or {}
-            if not change.get("ok"):
+            if not (item.get("visual_change") or {}).get("ok"):
                 raise RuntimeError(
                     "refusing Submit: {} has no verified selected-state change".format(
                         item.get("category", "unknown ability")
                     )
                 )
 
-        # fill_discovered already seeks the bottom, but re-check the live page
-        # instead of reusing an old rectangle.
+        # Locate the live, WIDE form Submit button. Never click any smaller
+        # orange button such as Post All.
         submit_rect = None
         submit_snap = None
-        for _ in range(6):
+        for _ in range(8):
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
             snap = self.snapshot("submit_live_check")
             rect = _orange_submit_button(snap["path"], self.window_rect)
-            if rect:
+            if rect and rect["width"] >= int(self.client_rect["width"] * 0.70):
                 submit_rect, submit_snap = rect, snap
                 break
-            self._scroll(-3, settle=0.20)
+            self._scroll(-2, settle=0.18)
 
         if not submit_rect:
-            raise RuntimeError("refusing Submit: large orange Submit button not found")
-
-        # Guard against accidentally treating the small orange Post All roster
-        # button as Submit.
-        if submit_rect["width"] < 280 or submit_rect["height"] < 20:
-            raise RuntimeError("refusing Submit: orange target is not the large form button")
+            raise RuntimeError(
+                "refusing Submit: the wide rating-form Submit button was not found"
+            )
 
         cx = submit_rect["left"] + submit_rect["width"] // 2
         cy = submit_rect["top"] + submit_rect["height"] // 2
         if not (
             self.client_rect["left"] + 30 <= cx
             < self.client_rect["left"] + self.client_rect["width"] - 30
-            and self.client_rect["top"] + 80 <= cy
-            < self.client_rect["top"] + self.client_rect["height"] - 20
+            and self.client_rect["top"] + int(self.client_rect["height"] * 0.60) <= cy
+            < self.client_rect["top"] + self.client_rect["height"] - 10
         ):
-            raise RuntimeError("refusing Submit: button centre is outside the safe client")
+            raise RuntimeError(
+                "refusing Submit: wide button is not in the lower form area"
+            )
 
+        # No console confirmation prompt means WOWKIDS can remain foreground.
+        # Raise it immediately before the one real click.
+        wkcommon.restore_window(self.wrapper)
+        time.sleep(0.12)
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
 
-        self.mouse.click(button="left", coords=(cx, cy))
+        before_path = submit_snap["path"]
+        self.mouse.click(button="left", coords=(int(cx), int(cy)))
+        click_issued = True
 
-        # From this point onward the Submit click has definitely been issued.
-        # Do not later report "Submit clicked: NO" just because Chromium's stale
-        # accessibility tree confused the page classifier.
-        deadline = time.monotonic() + float(timeout)
+        toast_seen = False
         last_state = "UNKNOWN"
         last_reasons = []
         last_signals = {}
         last_snap = submit_snap
-        form_gone_streak = 0
         attempt = 0
+        deadline = time.monotonic() + float(timeout)
 
         while time.monotonic() < deadline:
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
-            time.sleep(0.40)
+            time.sleep(0.35)
             attempt += 1
             snap = self.snapshot("after_submit_{:02d}".format(attempt))
-            state, reasons, signals = self._classify_snapshot(snap)
-            last_state = state
-            last_reasons = reasons
-            last_signals = signals or {}
             last_snap = snap
 
+            if _centre_toast_change(
+                before_path, snap["path"], self.window_rect, self.client_rect
+            ):
+                toast_seen = True
+
+            state, reasons, signals = self._classify_snapshot(snap)
+            last_state, last_reasons, last_signals = state, reasons, signals or {}
             roster = self._live_roster_evidence(signals)
+
             if state == "CLASS_ROSTER" or roster["verified"]:
                 return {
                     "clicked": True,
                     "accepted": True,
-                    "point": [int(cx), int(cy)],
-                    "submit_rect": submit_rect,
+                    "success_toast_seen": toast_seen,
                     "verified_return_to_roster": True,
                     "verification": (
                         "classifier"
                         if state == "CLASS_ROSTER"
                         else "visual Post All + live roster badge"
                     ),
-                    "state": state,
-                    "reasons": reasons,
-                    "roster_evidence": roster,
-                    "snapshot": snap["path"],
-                }
-
-            # A stale retained "Switch account" node can make classify_live_page
-            # say HOME even though the rendered rating form has disappeared.
-            # Treat two consecutive snapshots with no large form Submit and no
-            # visually supported rating headings as proof that the Submit action
-            # was accepted. This is sufficient for the one-student test, but the
-            # future class loop will still require roster evidence before it
-            # opens another student.
-            submit_still_visible = bool(
-                _orange_submit_button(snap["path"], self.window_rect)
-            )
-            live_headings = (signals or {}).get("rating_visual_supported", []) or []
-            if not submit_still_visible and len(live_headings) < 2:
-                form_gone_streak += 1
-            else:
-                form_gone_streak = 0
-
-            if form_gone_streak >= 2:
-                return {
-                    "clicked": True,
-                    "accepted": True,
                     "point": [int(cx), int(cy)],
                     "submit_rect": submit_rect,
-                    "verified_return_to_roster": False,
-                    "verification": "rating form disappeared after Submit",
                     "state": state,
                     "reasons": reasons,
                     "roster_evidence": roster,
                     "snapshot": snap["path"],
                 }
 
-        # If the rating form and its large Submit button are still there, the
-        # click did not visibly take effect. Otherwise the click happened but
-        # navigation was ambiguous; report the click truthfully and stop before
-        # doing anything else. Post All is never touched in either case.
-        submit_still_visible = False
-        if last_snap:
-            submit_still_visible = bool(
-                _orange_submit_button(last_snap["path"], self.window_rect)
-            )
-        if submit_still_visible:
-            raise RuntimeError(
-                "Submit click was issued, but the rating form still appears active"
-            )
+            # The human demo proves the success toast appears before navigation.
+            # Once seen, the Submit itself is confirmed even if stale Chromium
+            # nodes temporarily confuse page classification.
+            if toast_seen and attempt >= 2:
+                # Keep observing briefly for the roster, but no more clicks.
+                if attempt >= 8:
+                    return {
+                        "clicked": True,
+                        "accepted": True,
+                        "success_toast_seen": True,
+                        "verified_return_to_roster": False,
+                        "verification": "visual success toast",
+                        "point": [int(cx), int(cy)],
+                        "submit_rect": submit_rect,
+                        "state": state,
+                        "reasons": reasons,
+                        "roster_evidence": roster,
+                        "snapshot": snap["path"],
+                    }
 
+            # If there was no visible reaction at all, allow ONE retry only
+            # while the same wide Submit button is still visibly present.
+            if attempt == 3 and not toast_seen:
+                retry_rect = _orange_submit_button(
+                    snap["path"], self.window_rect
+                )
+                retry_roster = self._live_roster_evidence(signals)
+                if (
+                    retry_rect
+                    and retry_rect["width"] >= int(self.client_rect["width"] * 0.70)
+                    and not retry_roster["verified"]
+                ):
+                    rcx = retry_rect["left"] + retry_rect["width"] // 2
+                    rcy = retry_rect["top"] + retry_rect["height"] // 2
+                    wkcommon.restore_window(self.wrapper)
+                    time.sleep(0.08)
+                    self.mouse.click(button="left", coords=(int(rcx), int(rcy)))
+                    before_path = snap["path"]
+
+        # We did issue a Submit click, but never observed the success toast or
+        # roster. Report that truthfully and stop. Absolutely no Post All click.
         return {
-            "clicked": True,
-            "accepted": True,
+            "clicked": click_issued,
+            "accepted": bool(toast_seen),
+            "success_toast_seen": toast_seen,
+            "verified_return_to_roster": False,
+            "verification": (
+                "visual success toast"
+                if toast_seen
+                else "Submit click issued; success not visually verified"
+            ),
             "point": [int(cx), int(cy)],
             "submit_rect": submit_rect,
-            "verified_return_to_roster": False,
-            "verification": "Submit click changed the page; roster not yet proven",
             "state": last_state,
             "reasons": last_reasons,
             "roster_evidence": self._live_roster_evidence(last_signals),
