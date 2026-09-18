@@ -7,6 +7,8 @@ __pycache__/
 *.py[cod]
 calibration.json
 ratings.csv
+device_config.json
+agent_status.json
 
 # Human demo recordings contain real student UI/screenshots.
 # They must stay local and must NEVER be committed to this public repo.
