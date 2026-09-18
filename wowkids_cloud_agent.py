@@ -676,13 +676,9 @@ def run_forever():
 
     try:
         while True:
-            if abort_pressed():
-                _save_status(
-                    state="stopped",
-                    message="Stopped by ESC/F10",
-                )
-                return 0
-
+            # The background listener must not die just because the user presses
+            # Escape in an unrelated application. ESC/F10 is honored only once
+            # an actual WOWKIDS job is active.
             try:
                 response = api.poll()
                 job = response.get("job")
