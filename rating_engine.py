@@ -71,7 +71,7 @@ class WowkidsRatingSession:
     limited to expanding/collapsing rating accordions and selecting score rows.
     """
 
-    def __init__(self, reports_dir=None, max_nodes=8000):
+    def __init__(self, reports_dir=None, max_nodes=8000, raise_window=True):
         wkcommon.enable_utf8_stdout()
         wkcommon.bootstrap_libs()
         wkcommon.set_dpi_awareness()
@@ -93,7 +93,8 @@ class WowkidsRatingSession:
 
         self.target = target
         self.wrapper = target["wrapper"]
-        wkcommon.restore_window(self.wrapper)
+        if raise_window:
+            wkcommon.restore_window(self.wrapper)
         self.window_rect = wkcommon.window_rectangle(self.wrapper)
         self.client_rect = wkcommon.win32_client_rect(self.wrapper)
         if not self.window_rect or not self.client_rect:
