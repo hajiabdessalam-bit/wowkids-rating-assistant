@@ -84,7 +84,8 @@ def main():
         payload["scores"] = scores
 
         print("")
-        print("Starting guarded fill. It will NOT click Submit.")
+        print("Starting guarded fill. After all ratings verify, it will Submit automatically.")
+        print("Post All is structurally forbidden and will never be clicked.")
         print("Press ESC or F10 at any time to stop.")
         results, final_snap = session.fill_discovered(categories, scores)
         payload["results"] = results
@@ -95,27 +96,21 @@ def main():
         payload["submit_rect"] = submit_rect
 
         print("")
-        print("All ratings are visually verified.")
-        print("This next action is REAL: it will submit this student's rating.")
-        print("Type SUBMIT to continue, or press ENTER to leave it unsubmitted.")
-        choice = input("Action: ").strip().upper()
-
-        if choice == "SUBMIT":
-            submit_result = session.submit_verified_student(
-                categories, results
-            )
-            payload["submitted"] = bool(submit_result.get("clicked"))
-            payload["submit_result"] = submit_result
-            print("")
+        print("All ratings are visually verified. Submitting automatically...")
+        submit_result = session.submit_verified_student(
+            categories, results
+        )
+        payload["submitted"] = bool(submit_result.get("clicked"))
+        payload["submit_result"] = submit_result
+        print("")
+        if submit_result.get("accepted"):
             if submit_result.get("verified_return_to_roster"):
-                print("SUBMITTED: return to the class roster was visually verified.")
+                print("SUBMITTED: success and return to roster were visually verified.")
             else:
-                print("SUBMITTED: the rating form disappeared after Submit.")
-                print("Roster verification was inconclusive, so nothing else was clicked.")
-            print("Post All clicked: NO")
+                print("SUBMITTED: WOWKIDS success confirmation was visually verified.")
         else:
-            print("")
-            print("NOT SUBMITTED: ratings were left on the current form.")
+            print("WARNING: Submit click was issued, but success was not visually verified.")
+        print("Post All clicked: NO")
 
     except Exception as exc:
         payload["error"] = str(exc)
