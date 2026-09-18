@@ -109,12 +109,21 @@ class HumanLikeRatingSession(_BaseSession):
     form.  It deliberately contains NO Submit action.
     """
 
-    def _scroll(self, wheel_dist, settle=0.38):
-        """Scroll WOWKIDS without taking over the user's physical mouse.
+    def park_mouse(self):
+        """Do not move the user's physical cursor just to take screenshots.
 
-        Primary path posts WM_MOUSEWHEEL directly to the Chromium child under
-        the middle of the WOWKIDS client.  Only if that API is unavailable do
-        we briefly use pywinauto and immediately restore the cursor position.
+        The base engine parked the cursor before every capture. That made the
+        user feel locked out while a long positioning loop was running.
+        PrintWindow/BitBlt captures do not need us to relocate the cursor.
+        """
+        return
+
+    def _scroll(self, wheel_dist, settle=0.34):
+        """Scroll WOWKIDS with a background wheel message only.
+
+        We deliberately have NO physical-mouse fallback. If Windows cannot send
+        a background wheel event, fail closed rather than taking control of the
+        user's cursor.
         """
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
@@ -124,7 +133,6 @@ class HumanLikeRatingSession(_BaseSession):
         wheel_dist = int(wheel_dist)
         delta = wheel_dist * 120
 
-        sent = False
         try:
             import win32api
             import win32con
@@ -134,25 +142,10 @@ class HumanLikeRatingSession(_BaseSession):
             wparam = (delta & 0xFFFF) << 16
             lparam = win32api.MAKELONG(x & 0xFFFF, y & 0xFFFF)
             win32gui.PostMessage(hwnd, win32con.WM_MOUSEWHEEL, wparam, lparam)
-            sent = True
-        except Exception:
-            sent = False
-
-        if not sent:
-            old_pos = None
-            try:
-                import win32api
-                old_pos = win32api.GetCursorPos()
-            except Exception:
-                pass
-            self.mouse.move(coords=(x, y))
-            time.sleep(0.03)
-            self.mouse.scroll(coords=(x, y), wheel_dist=wheel_dist)
-            if old_pos is not None:
-                try:
-                    self.mouse.move(coords=old_pos)
-                except Exception:
-                    pass
+        except Exception as exc:
+            raise RuntimeError(
+                "background scrolling unavailable; refusing to take over the mouse: {}".format(exc)
+            )
 
         time.sleep(settle)
 
@@ -224,51 +217,74 @@ class HumanLikeRatingSession(_BaseSession):
         self._scroll_to_top()
         return found
 
-    def _position_category(self, category, max_steps=12):
-        """Bring the target heading into a broad safe zone.
+    def _position_category(self, category, max_steps=24):
+        """Find a category without ever blindly scrolling past it.
 
-        The previous implementation tried to centre the heading too precisely.
-        At the top of the page that could oscillate forever: one scroll moved
-        the heading slightly too high, the next moved it slightly too low.
-        The human demonstration shows that no exact Y is required; we only need
-        enough room below the heading for its description and five star rows.
+        The first version always scrolled down when the target heading was not
+        visible. With two expanded accordions above it, a 4-notch wheel step
+        could jump completely over the next heading. The following snapshots
+        still did not contain the target, so it kept moving down forever.
+
+        This search is directional:
+          * visible categories BEFORE the target -> move down;
+          * visible categories AFTER the target  -> we overshot, move up;
+          * visible target -> nudge it into a broad safe work zone;
+          * visible Submit while target missing -> definitely move up.
+
+        All search moves are only 1-2 wheel notches.
         """
-        safe_top = self.client_rect["top"] + 95
-        safe_bottom = self.client_rect["top"] + 330
+        if category not in CATEGORY_ORDER:
+            raise ValueError("unknown category {}".format(category))
+
+        target_index = CATEGORY_ORDER.index(category)
+        safe_top = self.client_rect["top"] + 105
+        safe_bottom = self.client_rect["top"] + 360
+        direction = -1  # categories are processed top-to-bottom
 
         for attempt in range(max_steps):
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
 
             snap = self.snapshot("{}_position_{:02d}".format(category, attempt))
-            supported = dict(self._supported_categories(snap))
-            node = supported.get(category)
+            visible_pairs = self._supported_categories(snap)
+            visible = dict(visible_pairs)
+            node = visible.get(category)
 
             if node and node.get("rect"):
                 top = node["rect"]["top"]
 
-                # Broad acceptance band: once the heading is safely visible,
-                # stop scrolling immediately and interact with it.
                 if safe_top <= top <= safe_bottom:
                     return snap
 
                 if top > safe_bottom:
-                    # Content must move upward.
-                    self._scroll(-4, settle=0.24)
-                    continue
+                    direction = -1
+                    self._scroll(-1, settle=0.20)
+                else:
+                    direction = 1
+                    self._scroll(1, settle=0.20)
+                continue
 
-                # Only move content down when the heading is actually clipped
-                # into the fixed header. Do not chase an arbitrary centre Y.
-                if top < safe_top:
-                    self._scroll(3, settle=0.24)
-                    continue
+            visible_indices = [
+                CATEGORY_ORDER.index(name)
+                for name, _node in visible_pairs
+                if name in CATEGORY_ORDER
+            ]
 
-            # Categories are processed top-to-bottom. If the requested heading
-            # is not rendered yet, continue downward in controlled steps.
-            self._scroll(-4, settle=0.24)
+            if visible_indices:
+                if any(index > target_index for index in visible_indices):
+                    # A later ability is already visible: target is above us.
+                    direction = 1
+                elif any(index < target_index for index in visible_indices):
+                    # Only earlier abilities are visible: target is below us.
+                    direction = -1
+            elif _orange_submit_button(snap["path"], self.window_rect):
+                # We reached the bottom without seeing the target. Reverse.
+                direction = 1
+
+            self._scroll(direction * 2, settle=0.22)
 
         raise RuntimeError(
-            "{} could not be positioned after {} controlled scrolls".format(
+            "{} was not found after {} small controlled scrolls; stopped safely".format(
                 category, max_steps
             )
         )
