@@ -101,6 +101,16 @@ class DemoRecorder:
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
 
+        # Explicit pointer-sized Win32 signatures matter on 64-bit Windows.
+        self.kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+        self.kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+        self.user32.CallNextHookEx.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, wt.WPARAM, wt.LPARAM
+        ]
+        self.user32.CallNextHookEx.restype = LRESULT
+        self.user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+        self.user32.UnhookWindowsHookEx.restype = wt.BOOL
+
         self._write_metadata(final=False)
 
     def _next_id(self):
@@ -406,7 +416,6 @@ class DemoRecorder:
                     pass
                 self.wheel_timer = None
             pending_wheel = self.wheel_event
-            self.wheel_event = None
 
         if pending_wheel is not None:
             self._finalize_wheel(pending_wheel)
