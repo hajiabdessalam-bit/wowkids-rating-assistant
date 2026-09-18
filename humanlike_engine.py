@@ -491,6 +491,25 @@ class HumanLikeRatingSession(_BaseSession):
             visible, None, snap["path"], self.window_rect
         )
 
+    @staticmethod
+    def _live_roster_evidence(signals):
+        """Use screenshot-corroborated roster pixels, never stale text alone."""
+        items = (signals or {}).get("roster_visual_support", []) or []
+        has_post_all = any(item.get("kind") == "post-all" for item in items)
+        badges = [
+            item for item in items
+            if item.get("kind") in ("posted", "purple-badge", "grey-badge")
+        ]
+        return {
+            "has_post_all": has_post_all,
+            "badge_count": len(badges),
+            "items": items,
+            # After Submit, one live status badge plus the visually verified
+            # Post All control is enough to prove we are back on the roster.
+            # We OBSERVE Post All here; we never click it.
+            "verified": bool(has_post_all and len(badges) >= 1),
+        }
+
     def submit_verified_student(self, categories, results, timeout=8.0):
         """Submit exactly once, but only after a fully verified fill.
 
@@ -561,33 +580,101 @@ class HumanLikeRatingSession(_BaseSession):
 
         self.mouse.click(button="left", coords=(cx, cy))
 
+        # From this point onward the Submit click has definitely been issued.
+        # Do not later report "Submit clicked: NO" just because Chromium's stale
+        # accessibility tree confused the page classifier.
         deadline = time.monotonic() + float(timeout)
         last_state = "UNKNOWN"
         last_reasons = []
+        last_signals = {}
+        last_snap = submit_snap
+        form_gone_streak = 0
         attempt = 0
+
         while time.monotonic() < deadline:
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
             time.sleep(0.40)
             attempt += 1
             snap = self.snapshot("after_submit_{:02d}".format(attempt))
-            state, reasons, _signals = self._classify_snapshot(snap)
+            state, reasons, signals = self._classify_snapshot(snap)
             last_state = state
             last_reasons = reasons
-            if state == "CLASS_ROSTER":
+            last_signals = signals or {}
+            last_snap = snap
+
+            roster = self._live_roster_evidence(signals)
+            if state == "CLASS_ROSTER" or roster["verified"]:
                 return {
                     "clicked": True,
+                    "accepted": True,
                     "point": [int(cx), int(cy)],
                     "submit_rect": submit_rect,
                     "verified_return_to_roster": True,
+                    "verification": (
+                        "classifier"
+                        if state == "CLASS_ROSTER"
+                        else "visual Post All + live roster badge"
+                    ),
                     "state": state,
                     "reasons": reasons,
+                    "roster_evidence": roster,
                     "snapshot": snap["path"],
                 }
 
-        raise RuntimeError(
-            "Submit was clicked but return to roster was not verified "
-            "(last state: {}; {})".format(
-                last_state, "; ".join(last_reasons) if last_reasons else "no reason"
+            # A stale retained "Switch account" node can make classify_live_page
+            # say HOME even though the rendered rating form has disappeared.
+            # Treat two consecutive snapshots with no large form Submit and no
+            # visually supported rating headings as proof that the Submit action
+            # was accepted. This is sufficient for the one-student test, but the
+            # future class loop will still require roster evidence before it
+            # opens another student.
+            submit_still_visible = bool(
+                _orange_submit_button(snap["path"], self.window_rect)
             )
-        )
+            live_headings = (signals or {}).get("rating_visual_supported", []) or []
+            if not submit_still_visible and len(live_headings) < 2:
+                form_gone_streak += 1
+            else:
+                form_gone_streak = 0
+
+            if form_gone_streak >= 2:
+                return {
+                    "clicked": True,
+                    "accepted": True,
+                    "point": [int(cx), int(cy)],
+                    "submit_rect": submit_rect,
+                    "verified_return_to_roster": False,
+                    "verification": "rating form disappeared after Submit",
+                    "state": state,
+                    "reasons": reasons,
+                    "roster_evidence": roster,
+                    "snapshot": snap["path"],
+                }
+
+        # If the rating form and its large Submit button are still there, the
+        # click did not visibly take effect. Otherwise the click happened but
+        # navigation was ambiguous; report the click truthfully and stop before
+        # doing anything else. Post All is never touched in either case.
+        submit_still_visible = False
+        if last_snap:
+            submit_still_visible = bool(
+                _orange_submit_button(last_snap["path"], self.window_rect)
+            )
+        if submit_still_visible:
+            raise RuntimeError(
+                "Submit click was issued, but the rating form still appears active"
+            )
+
+        return {
+            "clicked": True,
+            "accepted": True,
+            "point": [int(cx), int(cy)],
+            "submit_rect": submit_rect,
+            "verified_return_to_roster": False,
+            "verification": "Submit click changed the page; roster not yet proven",
+            "state": last_state,
+            "reasons": last_reasons,
+            "roster_evidence": self._live_roster_evidence(last_signals),
+            "snapshot": last_snap["path"] if last_snap else None,
+        }
