@@ -14,7 +14,12 @@ from humanlike_engine import HumanLikeRatingSession
 
 
 def _parse_scores(text, categories):
-    parts = [part.strip() for part in text.split(",") if part.strip()]
+    # Accept either commas or spaces, e.g. "4,4,3,5" or "4 4 3 5".
+    parts = [
+        part.strip()
+        for part in text.replace(",", " ").split()
+        if part.strip()
+    ]
     if len(parts) != len(categories):
         raise ValueError(
             "need exactly {} scores because this lesson has {} abilities".format(
@@ -60,14 +65,27 @@ def main():
 
         print("")
         print("Enter one score (1-5) for each ability IN THE ORDER ABOVE.")
-        print("Example for four abilities: 4,4,3,5")
-        raw = input("Scores: ").strip()
-        scores = _parse_scores(raw, categories)
+        print("Nothing will be rated until the number of scores matches.")
+        while True:
+            raw = input("Scores: ").strip()
+            try:
+                scores = _parse_scores(raw, categories)
+                break
+            except ValueError as exc:
+                print("")
+                print("NOT STARTED: {}".format(exc))
+                print(
+                    "I detected {} abilities, so please enter {} scores.".format(
+                        len(categories), len(categories)
+                    )
+                )
+                print("Example: {}".format(",".join(["4"] * len(categories))))
+                print("")
         payload["scores"] = scores
 
         print("")
         print("Starting guarded fill. It will NOT click Submit.")
-        print("Press ESC at any time to abort.")
+        print("Press ESC or F10 at any time to stop.")
         results, final_snap = session.fill_discovered(categories, scores)
         payload["results"] = results
         payload["final_screenshot"] = final_snap["path"]
