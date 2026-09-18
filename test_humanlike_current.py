@@ -46,7 +46,7 @@ def main():
     payload = {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "submitted": False,
-        "submit_code_present": False,
+        "submit_code_present": True,
         "results": [],
     }
 
@@ -94,13 +94,31 @@ def main():
         payload["submit_visible"] = bool(submit_rect)
         payload["submit_rect"] = submit_rect
 
+        print("")
+        print("All ratings are visually verified.")
+        print("This next action is REAL: it will submit this student's rating.")
+        print("Type SUBMIT to continue, or press ENTER to leave it unsubmitted.")
+        choice = input("Action: ").strip().upper()
+
+        if choice == "SUBMIT":
+            submit_result = session.submit_verified_student(
+                categories, results
+            )
+            payload["submitted"] = True
+            payload["submit_result"] = submit_result
+            print("")
+            print("SUBMITTED: return to the class roster was visually verified.")
+        else:
+            print("")
+            print("NOT SUBMITTED: ratings were left on the current form.")
+
     except Exception as exc:
         payload["error"] = str(exc)
         with open(report, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
         print("")
         print("ABORT: {}".format(exc))
-        print("Submit clicked: NO")
+        print("Submit clicked: {}".format("YES" if payload.get("submitted") else "NO"))
         print("REPORT: {}".format(report))
         return 2
 
