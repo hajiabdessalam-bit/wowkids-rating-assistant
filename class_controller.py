@@ -513,6 +513,7 @@ def main():
         "completed": [],
         "skipped": [],
         "errors": [],
+        "class_categories": None,
     }
 
     try:
@@ -539,6 +540,7 @@ def main():
 
         nav = RosterNavigator()
         nav.wait_for_roster(timeout=4.0)
+        class_categories = None
 
         for position, row in enumerate(selected, 1):
             if abort_pressed():
@@ -586,7 +588,15 @@ def main():
                 continue
 
             rater = HumanLikeRatingSession()
-            categories = rater.discover_categories()
+            if class_categories is None:
+                categories = rater.discover_categories()
+                class_categories = list(categories)
+                payload["class_categories"] = list(class_categories)
+                save_report(report_path, payload)
+                print("  ability layout detected once for this class")
+            else:
+                categories = list(class_categories)
+                print("  reusing class ability layout (skipping discovery scan)")
             scores = scores_for_categories(row, categories)
 
             print("  abilities: {}".format(", ".join(categories)))
