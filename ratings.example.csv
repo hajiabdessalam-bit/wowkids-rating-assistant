@@ -1,4 +1,3 @@
-<PARSED TEXT FOR SHEET: 1 / 1 TABS
-TAB NAME: ratings.example.csv>index,Student,Making,ProblemSolving,Theory,Creative,Interpersonal
-0,DemoStudent,4,4,4,3,5
-1,StudentB,5,4,5,4,4
+Student,Making,ProblemSolving,Theory,Creative,Interpersonal
+DemoStudent,4,4,4,3,5
+DemoFourAbility,4,4,4,,5
