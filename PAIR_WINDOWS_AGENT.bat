@@ -22,6 +22,10 @@ if not exist "libs\pywinauto" (
   if errorlevel 1 goto fail
 )
 
+echo Checking the new cloud agent...
+%PYEXE% -m py_compile wowkids_cloud_agent.py pair_windows_agent.py class_controller.py humanlike_engine.py
+if errorlevel 1 goto fail
+
 %PYEXE% pair_windows_agent.py
 set "RC=%ERRORLEVEL%"
 echo.
