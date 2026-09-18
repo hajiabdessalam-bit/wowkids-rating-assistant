@@ -139,13 +139,19 @@ class CloudApi:
 
 
 def _named_mutex_or_exit():
-    handle = ctypes.windll.kernel32.CreateMutexW(
-        None, False, MUTEX_NAME
-    )
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p
+    ]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
     if not handle:
         raise ctypes.WinError()
-    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-        ctypes.windll.kernel32.CloseHandle(handle)
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
         return None
     return handle
 
