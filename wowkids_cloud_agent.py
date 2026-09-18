@@ -41,7 +41,7 @@ JOB_SCORE_FOR_CATEGORY = {
 }
 
 ERROR_ALREADY_EXISTS = 183
-MUTEX_NAME = "Local\\WOWKIDSRatingAssistantCloudAgent"
+MUTEX_NAME = "Local\\WOWKIDSRatingAssistantCloudAgentV2"
 
 
 class ApiError(RuntimeError):
@@ -177,54 +177,133 @@ def _same_rect(a, b, tolerance=2):
 
 
 def _live_roster_document_nodes(snap, signals, client_rect):
-    """Return the UIA subtree owning the visually proven Post All button.
+    """Pick the Chromium Document that best matches screenshot-proven roster UI.
 
-    Chromium can retain stale PageFrames. We use the screenshot-corroborated
-    Post All rectangle to identify the live Document, then class/date/time
-    matching uses only nodes from that same Document.
+    WeChat can keep stale PageFrames visible to UI Automation.  A single live
+    Post All rectangle can therefore map to more than one Document.  Instead
+    of failing just because duplicates exist, score every candidate Document
+    against ALL screenshot-corroborated roster badges (Post All, Rated,
+    Not rateing, Gallery, etc.).  A stale document normally disagrees on some
+    names/statuses even when geometry is similar.
+
+    If the best candidates are still tied, we only accept the tie when their
+    visible header identity (date/time text) agrees.  Otherwise we fail closed.
     """
     evidence = (signals or {}).get("roster_visual_support", []) or []
-    post = next(
-        (
-            item
-            for item in evidence
-            if item.get("kind") == "post-all" and item.get("rect")
-        ),
-        None,
-    )
-    if not post:
+    evidence = [
+        item for item in evidence
+        if item.get("rect") and item.get("name")
+    ]
+    posts = [item for item in evidence if item.get("kind") == "post-all"]
+    if not posts:
         return []
 
     nodes = snap["nodes"]
     parents = ctx.build_parent_map(nodes)
-    candidate_indexes = []
+
+    def rect_close(a, b, tolerance=3):
+        if not a or not b:
+            return False
+        return all(
+            abs(int(a.get(key, 0)) - int(b.get(key, 0))) <= tolerance
+            for key in ("left", "top", "width", "height")
+        )
+
+    def norm(value):
+        return _normal_text(value).casefold()
+
+    candidate_docs = []
     for index, node in enumerate(nodes):
-        if (
-            _normal_text(node.get("name")) == _normal_text(post.get("name"))
-            and _same_rect(node.get("rect"), post.get("rect"))
+        if not node.get("rect"):
+            continue
+        if not any(
+            norm(node.get("name")) == norm(post.get("name"))
+            and rect_close(node.get("rect"), post.get("rect"))
+            for post in posts
         ):
-            candidate_indexes.append(index)
-
-    document_indexes = []
-    for index in candidate_indexes:
+            continue
         doc = ctx.document_index_of(index, nodes, parents)
-        if doc is not None and doc not in document_indexes:
-            document_indexes.append(doc)
+        if doc is not None and doc not in candidate_docs:
+            candidate_docs.append(doc)
 
-    if len(document_indexes) != 1:
+    scored = []
+    for doc_index in candidate_docs:
+        depth = nodes[doc_index].get("depth", 0)
+        subtree = []
+        for node in nodes[doc_index + 1 :]:
+            if node.get("depth", 0) <= depth:
+                break
+            ok, _reason = wkcommon.node_is_visibly_present(node, client_rect)
+            if ok:
+                subtree.append(node)
+
+        matched = []
+        for item in evidence:
+            wanted_name = norm(item.get("name"))
+            wanted_rect = item.get("rect")
+            if any(
+                norm(node.get("name")) == wanted_name
+                and rect_close(node.get("rect"), wanted_rect)
+                for node in subtree
+            ):
+                matched.append(item)
+
+        post_count = sum(1 for item in matched if item.get("kind") == "post-all")
+        badge_count = sum(
+            1 for item in matched
+            if item.get("kind") in ("posted", "purple-badge", "grey-badge")
+        )
+        if post_count < 1 or badge_count < 2:
+            continue
+
+        top_limit = client_rect["top"] + min(230, client_rect["height"] // 3)
+        header = []
+        for node in subtree:
+            rect = node.get("rect")
+            name = _normal_text(node.get("name"))
+            if rect and name and rect["top"] < top_limit:
+                header.append(name)
+        header_text = " | ".join(header)
+        dates = tuple(sorted(set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", header_text))))
+        times = tuple(sorted(set(
+            _normal_time(match)
+            for match in re.findall(
+                r"\b\d{1,2}:\d{2}\s*[-–—~～]\s*\d{1,2}:\d{2}\b",
+                header_text,
+            )
+        )))
+        scored.append({
+            "doc": doc_index,
+            "subtree": subtree,
+            "score": len(matched),
+            "badge_count": badge_count,
+            "dates": dates,
+            "times": times,
+        })
+
+    if not scored:
         return []
 
-    doc_index = document_indexes[0]
-    depth = nodes[doc_index].get("depth", 0)
-    subtree = []
-    for node in nodes[doc_index + 1 :]:
-        if node.get("depth", 0) <= depth:
-            break
-        ok, _reason = wkcommon.node_is_visibly_present(node, client_rect)
-        if ok:
-            subtree.append(node)
-    return subtree
+    scored.sort(
+        key=lambda item: (item["score"], item["badge_count"], item["doc"]),
+        reverse=True,
+    )
+    best_score = scored[0]["score"]
+    best_badges = scored[0]["badge_count"]
+    tied = [
+        item for item in scored
+        if item["score"] == best_score and item["badge_count"] == best_badges
+    ]
+    if len(tied) == 1:
+        return tied[0]["subtree"]
 
+    signatures = {(item["dates"], item["times"]) for item in tied}
+    if len(signatures) == 1:
+        # Equivalent duplicate accessibility frames. Prefer the newest frame.
+        tied.sort(key=lambda item: item["doc"], reverse=True)
+        return tied[0]["subtree"]
+
+    return []
 
 def _roster_identity(nav, label="cloud_match"):
     (
