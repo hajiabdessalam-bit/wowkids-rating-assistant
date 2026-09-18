@@ -11,12 +11,15 @@ from visual_score_rows import detect_visual_score_rows
 
 
 CATEGORY_ORDER = [name for name, _cn in wkcommon.CATEGORY_PAIRS]
-ABORT_KEY = 0x1B
+ABORT_KEYS = (0x1B, 0x79)  # ESC or F10
 
 
-def esc_pressed():
+def abort_pressed():
     try:
-        return bool(ctypes.windll.user32.GetAsyncKeyState(ABORT_KEY) & 0x8000)
+        return any(
+            bool(ctypes.windll.user32.GetAsyncKeyState(key) & 0x8000)
+            for key in ABORT_KEYS
+        )
     except Exception:
         return False
 
@@ -106,14 +109,51 @@ class HumanLikeRatingSession(_BaseSession):
     form.  It deliberately contains NO Submit action.
     """
 
-    def _scroll(self, wheel_dist, settle=0.50):
-        if esc_pressed():
-            raise RuntimeError("ESC pressed")
+    def _scroll(self, wheel_dist, settle=0.38):
+        """Scroll WOWKIDS without taking over the user's physical mouse.
+
+        Primary path posts WM_MOUSEWHEEL directly to the Chromium child under
+        the middle of the WOWKIDS client.  Only if that API is unavailable do
+        we briefly use pywinauto and immediately restore the cursor position.
+        """
+        if abort_pressed():
+            raise RuntimeError("STOP pressed (ESC/F10)")
+
         x = self.client_rect["left"] + self.client_rect["width"] // 2
         y = self.client_rect["top"] + min(500, self.client_rect["height"] - 220)
-        self.mouse.move(coords=(x, y))
-        time.sleep(0.05)
-        self.mouse.scroll(coords=(x, y), wheel_dist=int(wheel_dist))
+        wheel_dist = int(wheel_dist)
+        delta = wheel_dist * 120
+
+        sent = False
+        try:
+            import win32api
+            import win32con
+            import win32gui
+
+            hwnd = win32gui.WindowFromPoint((x, y)) or self.wrapper.handle
+            wparam = (delta & 0xFFFF) << 16
+            lparam = win32api.MAKELONG(x & 0xFFFF, y & 0xFFFF)
+            win32gui.PostMessage(hwnd, win32con.WM_MOUSEWHEEL, wparam, lparam)
+            sent = True
+        except Exception:
+            sent = False
+
+        if not sent:
+            old_pos = None
+            try:
+                import win32api
+                old_pos = win32api.GetCursorPos()
+            except Exception:
+                pass
+            self.mouse.move(coords=(x, y))
+            time.sleep(0.03)
+            self.mouse.scroll(coords=(x, y), wheel_dist=wheel_dist)
+            if old_pos is not None:
+                try:
+                    self.mouse.move(coords=old_pos)
+                except Exception:
+                    pass
+
         time.sleep(settle)
 
     def _supported_categories(self, snap):
@@ -147,11 +187,10 @@ class HumanLikeRatingSession(_BaseSession):
         return items
 
     def _scroll_to_top(self):
-        # The demo page is only a few viewports tall. Overscrolling upward is
-        # harmless and gives us a deterministic starting point without trusting
-        # Chromium's stale scroll/UIA state.
-        for _ in range(12):
-            self._scroll(7, settle=0.16)
+        # Use a few large background wheel messages rather than dozens of
+        # physical mouse-wheel actions.
+        for _ in range(6):
+            self._scroll(12, settle=0.12)
 
     def discover_categories(self, max_steps=30):
         """Scan the unmodified form and return abilities actually on this lesson.
@@ -162,8 +201,8 @@ class HumanLikeRatingSession(_BaseSession):
         found = []
 
         for step in range(max_steps):
-            if esc_pressed():
-                raise RuntimeError("ESC pressed")
+            if abort_pressed():
+                raise RuntimeError("STOP pressed (ESC/F10)")
 
             snap = self.snapshot("discover_{:02d}".format(step))
             for category, _node in self._supported_categories(snap):
@@ -185,14 +224,21 @@ class HumanLikeRatingSession(_BaseSession):
         self._scroll_to_top()
         return found
 
-    def _position_category(self, category, max_steps=24):
-        """Bring one live heading near the upper-middle safe work area."""
-        preferred_top = self.client_rect["top"] + 125
-        preferred_bottom = self.client_rect["top"] + 280
+    def _position_category(self, category, max_steps=12):
+        """Bring the target heading into a broad safe zone.
+
+        The previous implementation tried to centre the heading too precisely.
+        At the top of the page that could oscillate forever: one scroll moved
+        the heading slightly too high, the next moved it slightly too low.
+        The human demonstration shows that no exact Y is required; we only need
+        enough room below the heading for its description and five star rows.
+        """
+        safe_top = self.client_rect["top"] + 95
+        safe_bottom = self.client_rect["top"] + 330
 
         for attempt in range(max_steps):
-            if esc_pressed():
-                raise RuntimeError("ESC pressed")
+            if abort_pressed():
+                raise RuntimeError("STOP pressed (ESC/F10)")
 
             snap = self.snapshot("{}_position_{:02d}".format(category, attempt))
             supported = dict(self._supported_categories(snap))
@@ -200,19 +246,32 @@ class HumanLikeRatingSession(_BaseSession):
 
             if node and node.get("rect"):
                 top = node["rect"]["top"]
-                if preferred_top <= top <= preferred_bottom:
+
+                # Broad acceptance band: once the heading is safely visible,
+                # stop scrolling immediately and interact with it.
+                if safe_top <= top <= safe_bottom:
                     return snap
-                if top > preferred_bottom:
-                    self._scroll(-2, settle=0.28)
-                else:
-                    self._scroll(2, settle=0.28)
-                continue
 
-            # We process the discovered abilities top-to-bottom, so when the
-            # next heading is not rendered yet, move farther down.
-            self._scroll(-3, settle=0.30)
+                if top > safe_bottom:
+                    # Content must move upward.
+                    self._scroll(-4, settle=0.24)
+                    continue
 
-        raise RuntimeError("{} could not be positioned safely".format(category))
+                # Only move content down when the heading is actually clipped
+                # into the fixed header. Do not chase an arbitrary centre Y.
+                if top < safe_top:
+                    self._scroll(3, settle=0.24)
+                    continue
+
+            # Categories are processed top-to-bottom. If the requested heading
+            # is not rendered yet, continue downward in controlled steps.
+            self._scroll(-4, settle=0.24)
+
+        raise RuntimeError(
+            "{} could not be positioned after {} controlled scrolls".format(
+                category, max_steps
+            )
+        )
 
     def _section_for_live(self, snap, category):
         supported = self._supported_categories(snap)
@@ -315,8 +374,8 @@ class HumanLikeRatingSession(_BaseSession):
             return snap, rows, {"changed": False, "point": None}
 
         point = self._description_card_point(snap, category)
-        if esc_pressed():
-            raise RuntimeError("ESC pressed")
+        if abort_pressed():
+            raise RuntimeError("STOP pressed (ESC/F10)")
         self.mouse.click(button="left", coords=point)
         time.sleep(0.55)
 
@@ -357,8 +416,8 @@ class HumanLikeRatingSession(_BaseSession):
             raise RuntimeError("{} score target is outside safe area".format(category))
 
         baseline = self.snapshot("{}_score{}_baseline".format(category, score))
-        if esc_pressed():
-            raise RuntimeError("ESC pressed")
+        if abort_pressed():
+            raise RuntimeError("STOP pressed (ESC/F10)")
         self.mouse.click(button="left", coords=point)
         time.sleep(0.45)
         after = self.snapshot("{}_score{}_after".format(category, score))
@@ -389,8 +448,8 @@ class HumanLikeRatingSession(_BaseSession):
         self._scroll_to_top()
         results = []
         for category in categories:
-            if esc_pressed():
-                raise RuntimeError("ESC pressed")
+            if abort_pressed():
+                raise RuntimeError("STOP pressed (ESC/F10)")
             results.append(
                 self.select_score_humanlike(category, scores[category])
             )
