@@ -104,10 +104,15 @@ def main():
             submit_result = session.submit_verified_student(
                 categories, results
             )
-            payload["submitted"] = True
+            payload["submitted"] = bool(submit_result.get("clicked"))
             payload["submit_result"] = submit_result
             print("")
-            print("SUBMITTED: return to the class roster was visually verified.")
+            if submit_result.get("verified_return_to_roster"):
+                print("SUBMITTED: return to the class roster was visually verified.")
+            else:
+                print("SUBMITTED: the rating form disappeared after Submit.")
+                print("Roster verification was inconclusive, so nothing else was clicked.")
+            print("Post All clicked: NO")
         else:
             print("")
             print("NOT SUBMITTED: ratings were left on the current form.")
@@ -128,7 +133,8 @@ def main():
     print("")
     print("SUCCESS: every ability displayed by this lesson was filled and verified.")
     print("The accordions were intentionally left open, matching the human demo.")
-    print("Submit clicked: NO")
+    print("Submit clicked: {}".format("YES" if payload.get("submitted") else "NO"))
+    print("Post All clicked: NO")
     print("REPORT: {}".format(report))
     return 0
 
