@@ -410,7 +410,7 @@ def wait_for_matching_roster(api, job):
         reason = "waiting for WOWKIDS"
         identity = None
         try:
-            nav = RosterNavigator()
+            nav = RosterNavigator(raise_window=False)
             identity = _roster_identity(nav)
             matched, reason = _matches_job(identity, job)
             if matched:
