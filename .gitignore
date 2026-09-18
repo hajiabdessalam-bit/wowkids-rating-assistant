@@ -8,6 +8,10 @@ __pycache__/
 calibration.json
 ratings.csv
 
+# Human demo recordings contain real student UI/screenshots.
+# They must stay local and must NEVER be committed to this public repo.
+demos/
+
 # Local environments
 .venv/
 venv/
