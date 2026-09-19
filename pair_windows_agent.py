@@ -6,10 +6,18 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import winreg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HERE, "device_config.json")
+STATE_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or HERE,
+    "WOWKIDSRatingAssistant",
+)
+CONFIG_PATH = os.path.join(STATE_DIR, "device_config.json")
+LEGACY_CONFIG_PATH = os.path.join(HERE, "device_config.json")
 DEFAULT_BASE_URL = "https://feedback-assistant-alpha.vercel.app"
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = "WOWKIDS Rating Assistant"
 
 
 def api_check(token):
@@ -53,7 +61,7 @@ def pythonw_path():
     return executable
 
 
-def install_startup():
+def _startup_vbs_path():
     startup = os.path.join(
         os.environ.get("APPDATA", ""),
         "Microsoft",
@@ -62,29 +70,28 @@ def install_startup():
         "Programs",
         "Startup",
     )
-    if not startup or not os.path.isdir(startup):
-        raise RuntimeError("Windows Startup folder was not found")
-
-    path = os.path.join(startup, "WOWKIDS Rating Assistant Agent.vbs")
-    pythonw = pythonw_path()
-    agent = os.path.join(HERE, "wowkids_cloud_agent.py")
-
-    def vbs_quote(value):
-        return str(value).replace('"', '""')
-
-    content = (
-        'Set shell = CreateObject("WScript.Shell")\r\n'
-        'shell.CurrentDirectory = "{}"\r\n'.format(vbs_quote(HERE))
-        + 'shell.Run """{}"" ""{}""", 0, False\r\n'.format(
-            vbs_quote(pythonw), vbs_quote(agent)
-        )
-    )
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    return path
+    return os.path.join(startup, "WOWKIDS Rating Assistant Agent.vbs")
 
 
-def start_agent():
+def install_autostart():
+    """Install a per-user logon entry; no administrator rights required."""
+    supervisor = os.path.join(HERE, "wowkids_agent_supervisor.py")
+    command = '"{}" "{}"'.format(pythonw_path(), supervisor)
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+        winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, command)
+
+    # Remove the fragile first-generation Startup-folder launcher so there is
+    # only one supported startup path.
+    old_vbs = _startup_vbs_path()
+    try:
+        if os.path.exists(old_vbs):
+            os.remove(old_vbs)
+    except Exception:
+        pass
+    return command
+
+
+def start_supervisor():
     flags = 0
     if os.name == "nt":
         flags = (
@@ -93,17 +100,41 @@ def start_agent():
             | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
     subprocess.Popen(
-        [pythonw_path(), os.path.join(HERE, "wowkids_cloud_agent.py")],
+        [pythonw_path(), os.path.join(HERE, "wowkids_agent_supervisor.py")],
         cwd=HERE,
         close_fds=True,
         creationflags=flags,
     )
 
 
+def save_config(token, device_name="Windows PC"):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    config = {
+        "baseUrl": DEFAULT_BASE_URL,
+        "deviceToken": token,
+        "deviceName": device_name,
+    }
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(config, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, CONFIG_PATH)
+
+    # Keep no active secret in the git working tree after migration.
+    try:
+        if os.path.exists(LEGACY_CONFIG_PATH):
+            os.remove(LEGACY_CONFIG_PATH)
+    except Exception:
+        pass
+    return config
+
+
 def main():
     print("")
     print("WOWKIDS WINDOWS AGENT - ONE-TIME PAIRING")
     print("=" * 58)
+    print("")
+    print("This pairing is permanent across normal PC restarts.")
+    print("You should NOT need a new key every time Windows starts.")
     print("")
     print("In Feedback Assistant:")
     print("  Open a class -> WOWKIDS -> Pair PC")
@@ -119,28 +150,22 @@ def main():
     response = api_check(token)
     device = response.get("device") or {}
 
-    config = {
-        "baseUrl": DEFAULT_BASE_URL,
-        "deviceToken": token,
-        "deviceName": device.get("name") or "Windows PC",
-    }
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(config, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, CONFIG_PATH)
-
-    startup_path = install_startup()
-    start_agent()
+    config = save_config(
+        token, device.get("name") or "Windows PC"
+    )
+    install_autostart()
+    start_supervisor()
 
     print("")
     print("PAIRED SUCCESSFULLY")
-    print("  Device : {}".format(config["deviceName"]))
-    print("  Startup: installed")
+    print("  Device   : {}".format(config["deviceName"]))
+    print("  Pairing  : saved permanently in your Windows profile")
+    print("  Auto-run : installed for every Windows sign-in")
+    print("  Watchdog : enabled; the agent restarts itself if it crashes")
     print("")
-    print("You do not need to run this again.")
-    print("The agent will start quietly when you sign into Windows.")
-    print("It will only act when a queued Feedback Assistant job matches")
-    print("the WOWKIDS class roster currently open on this computer.")
+    print("You do not need to paste this key again after a normal restart.")
+    print("If the agent ever seems offline, run REPAIR_WINDOWS_AGENT.bat.")
+    print("That repair uses the saved pairing and asks for NO key.")
     print("")
     print("Post All is NEVER part of the automation.")
     print("")
