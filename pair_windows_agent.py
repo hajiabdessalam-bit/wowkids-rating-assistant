@@ -16,8 +16,11 @@ STATE_DIR = os.path.join(
 CONFIG_PATH = os.path.join(STATE_DIR, "device_config.json")
 LEGACY_CONFIG_PATH = os.path.join(HERE, "device_config.json")
 DEFAULT_BASE_URL = "https://feedback-assistant-alpha.vercel.app"
+
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "WOWKIDS Rating Assistant"
+TASK_LOGON = "WOWKIDS Rating Assistant Logon"
+TASK_WATCHDOG = "WOWKIDS Rating Assistant Watchdog"
 
 
 def api_check(token):
@@ -73,22 +76,83 @@ def _startup_vbs_path():
     return os.path.join(startup, "WOWKIDS Rating Assistant Agent.vbs")
 
 
-def install_autostart():
-    """Install a per-user logon entry; no administrator rights required."""
+def _supervisor_command():
     supervisor = os.path.join(HERE, "wowkids_agent_supervisor.py")
-    command = '"{}" "{}"'.format(pythonw_path(), supervisor)
+    return '"{}" "{}"'.format(pythonw_path(), supervisor)
+
+
+def _write_startup_vbs():
+    path = _startup_vbs_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    def q(value):
+        return str(value).replace('"', '""')
+
+    content = (
+        'Set shell = CreateObject("WScript.Shell")\r\n'
+        'shell.CurrentDirectory = "{}"\r\n'.format(q(HERE))
+        + 'shell.Run """{}"" ""{}""", 0, False\r\n'.format(
+            q(pythonw_path()),
+            q(os.path.join(HERE, "wowkids_agent_supervisor.py")),
+        )
+    )
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    return path
+
+
+def _install_scheduled_tasks(command):
+    """Best-effort redundancy. Failure does not break registry/startup methods."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    results = []
+    specs = [
+        [
+            "schtasks", "/Create", "/F",
+            "/TN", TASK_LOGON,
+            "/SC", "ONLOGON",
+            "/RL", "LIMITED",
+            "/TR", command,
+        ],
+        [
+            "schtasks", "/Create", "/F",
+            "/TN", TASK_WATCHDOG,
+            "/SC", "MINUTE", "/MO", "5",
+            "/RL", "LIMITED",
+            "/TR", command,
+        ],
+    ]
+    for spec in specs:
+        try:
+            result = subprocess.run(
+                spec,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+                timeout=20,
+                check=False,
+            )
+            results.append(result.returncode == 0)
+        except Exception:
+            results.append(False)
+    return results
+
+
+def install_autostart():
+    """Install three no-admin startup paths; supervisor mutex prevents duplicates."""
+    command = _supervisor_command()
+
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
         winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, command)
 
-    # Remove the fragile first-generation Startup-folder launcher so there is
-    # only one supported startup path.
-    old_vbs = _startup_vbs_path()
-    try:
-        if os.path.exists(old_vbs):
-            os.remove(old_vbs)
-    except Exception:
-        pass
-    return command
+    vbs_path = _write_startup_vbs()
+    task_results = _install_scheduled_tasks(command)
+
+    return {
+        "registry": True,
+        "startupVbs": vbs_path,
+        "scheduledTasks": task_results,
+        "command": command,
+    }
 
 
 def start_supervisor():
@@ -102,6 +166,9 @@ def start_supervisor():
     subprocess.Popen(
         [pythonw_path(), os.path.join(HERE, "wowkids_agent_supervisor.py")],
         cwd=HERE,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         close_fds=True,
         creationflags=flags,
     )
@@ -119,7 +186,6 @@ def save_config(token, device_name="Windows PC"):
         json.dump(config, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, CONFIG_PATH)
 
-    # Keep no active secret in the git working tree after migration.
     try:
         if os.path.exists(LEGACY_CONFIG_PATH):
             os.remove(LEGACY_CONFIG_PATH)
@@ -158,10 +224,11 @@ def main():
 
     print("")
     print("PAIRED SUCCESSFULLY")
-    print("  Device   : {}".format(config["deviceName"]))
-    print("  Pairing  : saved permanently in your Windows profile")
-    print("  Auto-run : installed for every Windows sign-in")
-    print("  Watchdog : enabled; the agent restarts itself if it crashes")
+    print("  Device    : {}".format(config["deviceName"]))
+    print("  Pairing   : saved permanently in your Windows profile")
+    print("  Auto-run  : registry + Startup folder")
+    print("  Watchdog  : self-healing supervisor enabled")
+    print("  Extra task: scheduled watchdog attempted")
     print("")
     print("You do not need to paste this key again after a normal restart.")
     print("If the agent ever seems offline, run REPAIR_WINDOWS_AGENT.bat.")
