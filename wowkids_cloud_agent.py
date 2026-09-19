@@ -25,8 +25,13 @@ from class_controller import (
 from humanlike_engine import HumanLikeRatingSession, abort_pressed
 
 
-CONFIG_PATH = os.path.join(HERE, "device_config.json")
-STATUS_PATH = os.path.join(HERE, "agent_status.json")
+STATE_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or HERE,
+    "WOWKIDSRatingAssistant",
+)
+CONFIG_PATH = os.path.join(STATE_DIR, "device_config.json")
+LEGACY_CONFIG_PATH = os.path.join(HERE, "device_config.json")
+STATUS_PATH = os.path.join(STATE_DIR, "agent_status.json")
 LOG_DIR = os.path.join(HERE, "logs")
 DEFAULT_BASE_URL = "https://feedback-assistant-alpha.vercel.app"
 POLL_IDLE_SECONDS = 15
@@ -63,9 +68,22 @@ def _write_json(path, payload):
 
 
 def _read_config():
+    os.makedirs(STATE_DIR, exist_ok=True)
+
+    # Migrate the original repo-local pairing file once. The permanent copy
+    # lives under LOCALAPPDATA so git pulls, repo cleanups and app updates
+    # cannot make the PC "forget" its device token.
+    if not os.path.exists(CONFIG_PATH) and os.path.exists(LEGACY_CONFIG_PATH):
+        try:
+            with open(LEGACY_CONFIG_PATH, encoding="utf-8") as fh:
+                legacy = json.load(fh)
+            _write_json(CONFIG_PATH, legacy)
+        except Exception:
+            pass
+
     if not os.path.exists(CONFIG_PATH):
         raise RuntimeError(
-            "This PC is not paired yet. Run PAIR_WINDOWS_AGENT.bat once."
+            "This PC has never been paired. Run PAIR_WINDOWS_AGENT.bat once."
         )
     with open(CONFIG_PATH, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -73,8 +91,8 @@ def _read_config():
     base_url = str(data.get("baseUrl") or DEFAULT_BASE_URL).rstrip("/")
     if not token.startswith("wk_"):
         raise RuntimeError(
-            "device_config.json does not contain a valid pairing token. "
-            "Run PAIR_WINDOWS_AGENT.bat again."
+            "The saved pairing is invalid. Use PAIR_WINDOWS_AGENT.bat only "
+            "if this PC was intentionally reset."
         )
     return {"deviceToken": token, "baseUrl": base_url}
 
@@ -736,11 +754,60 @@ def process_job(api, job):
     )
 
 
+def _select_runnable_job(response):
+    """Choose the job whose class is actually open, not merely the oldest job.
+
+    A coach can queue several classes. Older jobs may legitimately stay in
+    waiting_for_class for hours. They must not monopolize the agent and block
+    a newer class that is currently open in WOWKIDS.
+    """
+    jobs = list(response.get("jobs") or [])
+    if not jobs and response.get("job"):
+        jobs = [response["job"]]
+    if not jobs:
+        return None, "no pending jobs"
+
+    # If a job had already started rating students before a restart, resume it
+    # before considering anything else.
+    for job in jobs:
+        if job.get("status") != "running":
+            continue
+        stage = (job.get("progress") or {}).get("stage")
+        if stage not in ("waiting_for_class", "queued"):
+            return job, "resuming active rating job"
+
+    # All remaining jobs are queued or merely waiting for their class. Observe
+    # the current roster once and select whichever job matches its identity.
+    try:
+        nav = RosterNavigator(raise_window=False)
+        identity = _roster_identity(nav, label="cloud_pick_job")
+    except Exception as exc:
+        return None, "waiting for a WOWKIDS roster: {}".format(exc)
+
+    reasons = []
+    for job in jobs:
+        matched, reason = _matches_job(identity, job)
+        if matched:
+            return job, reason
+        reasons.append(
+            "{} {}: {}".format(
+                job.get("target_date") or "",
+                job.get("class_time") or "",
+                reason,
+            ).strip()
+        )
+
+    return None, "open roster does not match pending jobs ({})".format(
+        " | ".join(reasons[:4])
+    )
+
+
 def run_forever():
     wkcommon.enable_utf8_stdout()
     wkcommon.bootstrap_libs()
     wkcommon.set_dpi_awareness()
     os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(STATE_DIR, exist_ok=True)
 
     config = _read_config()
     api = CloudApi(config)
@@ -760,9 +827,12 @@ def run_forever():
             # an actual WOWKIDS job is active.
             try:
                 response = api.poll()
-                job = response.get("job")
                 device = response.get("device") or {}
-                if not job:
+                jobs = list(response.get("jobs") or [])
+                if not jobs and response.get("job"):
+                    jobs = [response["job"]]
+
+                if not jobs:
                     _save_status(
                         state="idle",
                         device=device.get("name"),
@@ -771,10 +841,22 @@ def run_forever():
                     time.sleep(POLL_IDLE_SECONDS)
                     continue
 
+                job, selection_reason = _select_runnable_job(response)
+                if not job:
+                    _save_status(
+                        state="waiting_for_matching_class",
+                        device=device.get("name"),
+                        pendingJobs=len(jobs),
+                        message=selection_reason,
+                    )
+                    time.sleep(POLL_WAITING_SECONDS)
+                    continue
+
                 _save_status(
                     state="job_found",
                     jobId=job.get("id"),
-                    message="Queued class: {} {}".format(
+                    message="{} — {} {}".format(
+                        selection_reason,
                         job.get("target_date") or "",
                         job.get("class_time") or "",
                     ).strip(),
