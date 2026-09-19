@@ -46,7 +46,7 @@ JOB_SCORE_FOR_CATEGORY = {
 }
 
 ERROR_ALREADY_EXISTS = 183
-MUTEX_NAME = "Local\\WOWKIDSRatingAssistantCloudAgentV2"
+MUTEX_NAME = "Local\\WOWKIDSRatingAssistantCloudAgentV3"
 
 
 class ApiError(RuntimeError):
