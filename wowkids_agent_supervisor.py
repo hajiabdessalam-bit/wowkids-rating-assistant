@@ -7,8 +7,37 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+STATE_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or HERE,
+    "WOWKIDSRatingAssistant",
+)
+AGENT_STATUS = os.path.join(STATE_DIR, "agent_status.json")
+SUPERVISOR_STATUS = os.path.join(STATE_DIR, "supervisor_status.txt")
+LOG_PATH = os.path.join(STATE_DIR, "supervisor.log")
+
 ERROR_ALREADY_EXISTS = 183
-SUPERVISOR_MUTEX = "Local\\WOWKIDSRatingAssistantSupervisorV1"
+SUPERVISOR_MUTEX = "Local\\WOWKIDSRatingAssistantSupervisorV2"
+STALE_AGENT_SECONDS = 95
+CHECK_EVERY_SECONDS = 8
+
+
+def _stamp():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _log(message):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    line = "[{}] {}\n".format(_stamp(), message)
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass
+    try:
+        with open(SUPERVISOR_STATUS, "w", encoding="utf-8") as fh:
+            fh.write(line)
+    except Exception:
+        pass
 
 
 def pythonw_path():
@@ -46,9 +75,8 @@ def _hidden_flags():
 
 
 def _silent_git_pull():
-    """Best-effort update at logon/restart; never prevents the agent starting."""
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["git", "pull", "--ff-only"],
             cwd=HERE,
             stdin=subprocess.DEVNULL,
@@ -58,41 +86,109 @@ def _silent_git_pull():
             creationflags=_hidden_flags(),
             check=False,
         )
+        _log("git pull exit code {}".format(result.returncode))
+    except Exception as exc:
+        _log("git pull skipped/failed: {}".format(exc))
+
+
+def _run_agent():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    log_handle = open(LOG_PATH, "a", encoding="utf-8")
+    proc = subprocess.Popen(
+        [pythonw_path(), os.path.join(HERE, "wowkids_cloud_agent.py")],
+        cwd=HERE,
+        stdin=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=log_handle,
+        close_fds=True,
+        creationflags=_hidden_flags(),
+    )
+    _log("agent launched pid={}".format(proc.pid))
+    return proc, log_handle
+
+
+def _status_age_seconds():
+    try:
+        return max(0.0, time.time() - os.path.getmtime(AGENT_STATUS))
+    except Exception:
+        return None
+
+
+def _stop_process(proc):
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+        return
+    except Exception:
+        pass
+    try:
+        proc.kill()
     except Exception:
         pass
 
 
-def _run_agent():
-    return subprocess.Popen(
-        [pythonw_path(), os.path.join(HERE, "wowkids_cloud_agent.py")],
-        cwd=HERE,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        creationflags=_hidden_flags(),
-    )
-
-
 def main():
+    os.makedirs(STATE_DIR, exist_ok=True)
     handle = _single_instance()
     if handle is None:
         return 0
 
+    _log("supervisor started")
     try:
         _silent_git_pull()
 
         while True:
+            proc = None
+            log_handle = None
+            launched_at = time.time()
             try:
-                proc = _run_agent()
-                proc.wait()
-            except Exception:
-                pass
+                proc, log_handle = _run_agent()
 
-            # A crash or accidental process exit should heal itself without
-            # making the coach re-pair or reopen anything.
-            time.sleep(8)
+                while proc.poll() is None:
+                    time.sleep(CHECK_EVERY_SECONDS)
+                    age = _status_age_seconds()
+
+                    # Give a fresh agent enough time for its first API poll.
+                    if age is None and time.time() - launched_at < 45:
+                        continue
+
+                    if age is not None and age <= STALE_AGENT_SECONDS:
+                        _log(
+                            "healthy: agent heartbeat {:.0f}s old".format(age)
+                        )
+                        continue
+
+                    # A living but silent process is worse than a crash because
+                    # queued jobs wait forever. Recycle it automatically.
+                    if age is None:
+                        _log("agent produced no heartbeat; restarting it")
+                    else:
+                        _log(
+                            "agent heartbeat stale ({:.0f}s); restarting it".format(
+                                age
+                            )
+                        )
+                    _stop_process(proc)
+                    break
+
+                code = proc.poll()
+                _log("agent exited code={}; restart in 5s".format(code))
+            except Exception as exc:
+                _log("supervisor loop error: {}".format(exc))
+                if proc is not None:
+                    _stop_process(proc)
+            finally:
+                try:
+                    if log_handle is not None:
+                        log_handle.close()
+                except Exception:
+                    pass
+
+            time.sleep(5)
     finally:
+        _log("supervisor stopped")
         try:
             ctypes.windll.kernel32.CloseHandle(handle)
         except Exception:
