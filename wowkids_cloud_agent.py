@@ -487,6 +487,16 @@ def _scores_for_categories(item, categories):
         result[category] = value
     return result
 
+def _available_scores(item):
+    raw = item.get("scores") or {}
+    result = {}
+    for category, key in JOB_SCORE_FOR_CATEGORY.items():
+        value = raw.get(key)
+        if isinstance(value, int) and 1 <= value <= 5:
+            result[category] = value
+    return result
+
+
 
 def _save_status(**fields):
     data = {"updatedAt": _now(), "pid": os.getpid(), "codeVersion": LOADED_VERSION}
@@ -802,15 +812,24 @@ def process_job(api, job):
             rater.wait_for_assessment_ready(student=matched_name)
 
         if class_categories is None:
-            with perf.phase("category_discovery"):
-                class_categories = list(rater.discover_categories())
+            available_scores = _available_scores(item)
+            with perf.phase("rating_actions"):
+                discovered, results, _final = rater.discover_and_fill(
+                    available_scores
+                )
+            class_categories = list(discovered)
+            scores = {
+                category: available_scores[category]
+                for category in class_categories
+            }
+            perf.note("firstStudentDiscoveryIntegrated", True)
+        else:
+            scores = _scores_for_categories(item, class_categories)
+            with perf.phase("rating_actions"):
+                results, _final = rater.fill_discovered(
+                    class_categories, scores
+                )
         perf.note("categoryCount", len(class_categories or []))
-
-        scores = _scores_for_categories(item, class_categories)
-        with perf.phase("rating_actions"):
-            results, _final = rater.fill_discovered(
-                class_categories, scores
-            )
         with perf.phase("submit"):
             submit = rater.submit_verified_student(
                 class_categories, results
