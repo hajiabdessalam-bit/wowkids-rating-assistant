@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import datetime as dt
 import json
 import os
 import re
@@ -545,7 +546,7 @@ def wait_for_matching_roster(api, job):
                 )
                 target_date = passive._popup_has_date(
                     visible,
-                    __import__("datetime").datetime.strptime(
+                    dt.datetime.strptime(
                         str(job.get("target_date")), "%Y-%m-%d"
                     ).date(),
                 )
