@@ -618,6 +618,88 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
 
         raise RuntimeError("View comments was not found after bounded scrolling")
 
+    def go_home_from_roster(self, timeout=6.0):
+        """Return a completed class roster to WOWKIDS Home.
+
+        The bottom navigation bar exposes a visible "Home" tab. Using that is
+        safer and more deterministic than replaying browser/back history or
+        guessing how many modal layers are open.
+
+        This method never touches Post All or any student card.
+        """
+        snap, visible, state, reasons, signals = self.live_snapshot(
+            "batch_return_home_before"
+        )
+        if state == "HOME" or self._calendar_month(visible) is not None:
+            return {
+                "alreadyHome": True,
+                "snapshot": snap["path"],
+            }
+
+        # Require a live roster before clicking the bottom navigation.
+        roster_items = (signals or {}).get("roster_visual_support", []) or []
+        has_post_all = any(
+            item.get("kind") == "post-all" for item in roster_items
+        )
+        if state != "CLASS_ROSTER" and not has_post_all:
+            raise RuntimeError(
+                "cannot return to Home: current page is not a verified roster"
+            )
+
+        candidates = []
+        bottom_start = (
+            self.client_rect["top"] + int(self.client_rect["height"] * 0.82)
+        )
+        for node in visible:
+            if _norm(node.get("name")) != "home":
+                continue
+            rect = node.get("rect")
+            if not rect or not _inside(rect, self.client_rect, margin=4):
+                continue
+            cy = rect["top"] + rect["height"] // 2
+            if cy < bottom_start:
+                continue
+            candidates.append(node)
+
+        if not candidates:
+            raise RuntimeError(
+                "verified roster is open, but the bottom Home tab was not found"
+            )
+
+        candidates.sort(
+            key=lambda node: node["rect"]["top"],
+            reverse=True,
+        )
+        self._click_node(
+            candidates[0],
+            "bottom Home tab",
+            settle=0.18,
+        )
+
+        deadline = time.monotonic() + float(timeout)
+        attempt = 0
+        while time.monotonic() < deadline:
+            after, visible_after, state_after, _reasons, _signals = (
+                self.live_snapshot(
+                    "batch_return_home_{:02d}".format(attempt)
+                )
+            )
+            if (
+                state_after == "HOME"
+                or self._calendar_month(visible_after) is not None
+            ):
+                return {
+                    "alreadyHome": False,
+                    "snapshot": after["path"],
+                }
+            attempt += 1
+            time.sleep(0.15)
+
+        raise RuntimeError(
+            "bottom Home tab was clicked but the calendar Home page was not verified"
+        )
+
+
     def navigate_to_roster(self, job):
         target_date = _parse_iso_date(job.get("target_date"))
         target_time = _text(job.get("class_time"))
