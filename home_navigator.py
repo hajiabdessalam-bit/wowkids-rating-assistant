@@ -209,7 +209,100 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             ):
                 return True
 
+        # Screenshot-only fallback for expanded/scrolled popups where UIA
+        # exposes only narrow text children of the wide purple bars.
+        if len(self._rendered_purple_band_groups()) >= 2:
+            return True
+
         return False
+
+    def _rendered_purple_band_groups(self, below_screen_y=None):
+        """Detect wide purple class/student bars directly from rendered pixels."""
+        try:
+            from PIL import Image
+            image = Image.open(self._navigation_shot).convert("RGB")
+        except Exception:
+            return []
+
+        wx = self.window_rect["left"]
+        wy = self.window_rect["top"]
+        cx0 = max(0, self.client_rect["left"] - wx)
+        cx1 = min(
+            image.width,
+            self.client_rect["left"] + self.client_rect["width"] - wx,
+        )
+        cy0 = max(0, self.client_rect["top"] - wy)
+        cy1 = min(
+            image.height,
+            self.client_rect["top"] + self.client_rect["height"] - wy,
+        )
+        if below_screen_y is not None:
+            cy0 = max(cy0, int(below_screen_y - wy) + 3)
+
+        x0 = int(cx0 + (cx1 - cx0) * 0.05)
+        x1 = int(cx0 + (cx1 - cx0) * 0.95)
+        if x1 <= x0 or cy1 <= cy0:
+            return []
+
+        pixels = image.load()
+        step = 3
+        xs = list(range(x0, x1, step))
+        sample_count = max(1, len(xs))
+        hot_rows = []
+
+        for y in range(cy0, cy1):
+            purple = 0
+            for x in xs:
+                red, green, blue = pixels[x, y]
+                if (
+                    50 <= red < 185
+                    and blue >= 60
+                    and blue > green + 20
+                    and red > green + 10
+                ):
+                    purple += 1
+            if purple / sample_count >= 0.50:
+                hot_rows.append(y)
+
+        groups = []
+        start = previous = None
+        for y in hot_rows:
+            if start is None:
+                start = previous = y
+                continue
+            if y == previous + 1:
+                previous = y
+                continue
+            groups.append((start, previous))
+            start = previous = y
+        if start is not None:
+            groups.append((start, previous))
+
+        return [
+            (a + wy, b + wy)
+            for a, b in groups
+            if 12 <= (b - a + 1) <= 70
+        ]
+
+    def _rendered_expanded_rows(self, visible, target_time):
+        """Rendered proof that the target class row has expanded."""
+        time_nodes = self._time_candidates(visible, target_time)
+        if time_nodes:
+            bottom = max(
+                node["rect"]["top"] + node["rect"]["height"]
+                for node in time_nodes
+                if node.get("rect")
+            )
+            return len(
+                self._rendered_purple_band_groups(
+                    below_screen_y=bottom
+                )
+            ) >= 2
+
+        # If Chromium drops the time text after expansion, a collapsed popup
+        # has only the class-time bars while an expanded popup has many rows.
+        return len(self._rendered_purple_band_groups()) >= 4
+
 
     def _visible_names(self, visible):
         return [_text(node.get("name")) for node in visible if _text(node.get("name"))]
@@ -438,7 +531,10 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         raise RuntimeError("queued class row did not expand")
 
     def _expanded_student_rows(self, visible, target_time):
-        """Heuristic: many wide purple-ish row-sized UIA nodes below target time."""
+        """Verify expansion from rendered purple rows, then UIA geometry."""
+        if self._rendered_expanded_rows(visible, target_time):
+            return True
+
         time_nodes = self._time_candidates(visible, target_time)
         if not time_nodes:
             return False
@@ -455,7 +551,10 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
                 continue
             if rect["top"] <= bottom + 8:
                 continue
-            if rect["width"] >= int(self.client_rect["width"] * 0.55) and 24 <= rect["height"] <= 65:
+            if (
+                rect["width"] >= int(self.client_rect["width"] * 0.55)
+                and 24 <= rect["height"] <= 65
+            ):
                 count += 1
         return count >= 3
 
