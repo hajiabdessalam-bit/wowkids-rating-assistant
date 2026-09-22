@@ -95,6 +95,8 @@ class WowkidsRatingSession:
         self.wrapper = target["wrapper"]
         if raise_window:
             wkcommon.restore_window(self.wrapper)
+        else:
+            wkcommon.prepare_background_window(self.wrapper)
         self.window_rect = wkcommon.window_rectangle(self.wrapper)
         self.client_rect = wkcommon.win32_client_rect(self.wrapper)
         if not self.window_rect or not self.client_rect:
