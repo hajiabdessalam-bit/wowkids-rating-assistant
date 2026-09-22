@@ -31,6 +31,10 @@ from humanlike_engine import (
 )
 from home_navigator import WowkidsHomeNavigator
 from performance_log import StudentPerformance
+from background_workspace import (
+    enable_for_current_wowkids,
+    recover_previous_workspace_mode,
+)
 
 
 STATE_DIR = os.path.join(
@@ -61,7 +65,8 @@ def _source_version():
     digest = hashlib.sha256()
     for name in ('wowkids_cloud_agent.py', 'home_navigator.py', 'class_controller.py',
                  'humanlike_engine.py', 'rating_engine.py', 'validate_context.py',
-                 'visual_score_rows.py', 'wkcommon.py', 'performance_log.py'):
+                 'visual_score_rows.py', 'wkcommon.py', 'performance_log.py',
+                 'background_workspace.py'):
         with open(os.path.join(HERE, name), 'rb') as source:
             digest.update(source.read())
     return digest.hexdigest()[:16]
@@ -1144,6 +1149,12 @@ def run_forever():
     os.makedirs(LOG_DIR, exist_ok=True)
     os.makedirs(STATE_DIR, exist_ok=True)
 
+    # If the previous agent was killed mid-job, restore the WOWKIDS window
+    # before doing anything else. This prevents a crash from leaving the mini
+    # program nearly transparent/click-through.
+    recover_previous_workspace_mode()
+    workspace_guard = None
+
     config = _read_config()
     api = CloudApi(config)
     mutex = _named_mutex_or_exit()
@@ -1173,6 +1184,12 @@ def run_forever():
                     jobs = [response["job"]]
 
                 if not jobs:
+                    if workspace_guard is not None:
+                        try:
+                            workspace_guard.restore()
+                        except Exception:
+                            pass
+                        workspace_guard = None
                     _save_status(
                         state="idle",
                         device=device.get("name"),
@@ -1180,6 +1197,22 @@ def run_forever():
                     )
                     time.sleep(POLL_IDLE_SECONDS)
                     continue
+
+                # Once work is waiting, keep WOWKIDS rendered without taking
+                # over the user's desktop. The window stays topmost only in an
+                # almost-transparent, click-through, non-activating form.
+                if workspace_guard is None:
+                    workspace_guard, workspace_reason = (
+                        enable_for_current_wowkids()
+                    )
+                    if workspace_guard is not None:
+                        _save_status(
+                            state="workspace_mode",
+                            device=device.get("name"),
+                            pendingJobs=len(jobs),
+                            message=workspace_reason,
+                            workspaceMode="transparent-click-through",
+                        )
 
                 job, selection_reason = _select_runnable_job(response)
                 if not job:
@@ -1264,6 +1297,11 @@ def run_forever():
                 )
                 time.sleep(POLL_IDLE_SECONDS)
     finally:
+        if workspace_guard is not None:
+            try:
+                workspace_guard.restore()
+            except Exception:
+                pass
         try:
             ctypes.windll.kernel32.CloseHandle(mutex)
         except Exception:
