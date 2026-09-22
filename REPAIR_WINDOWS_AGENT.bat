@@ -6,8 +6,8 @@ echo ============================================================
 echo WOWKIDS WINDOWS AGENT - NO-KEY REPAIR
 echo ============================================================
 echo.
-echo Updating through Feedback Assistant...
-echo GitHub is NOT required on this PC.
+echo Updates are now delivered through the normal agent connection.
+echo GitHub and a separate updater connection are NOT required.
 echo Your saved pairing will NOT be changed.
 echo.
 
@@ -20,14 +20,6 @@ if not defined PYEXE (
   echo Could not find Python 3.
   goto fail
 )
-
-if not exist "vercel_update.py" (
-  echo The permanent cloud updater is not installed on this PC yet.
-  goto fail
-)
-
-%PYEXE% vercel_update.py
-if errorlevel 1 goto fail
 
 if not exist "libs\pywinauto" (
   echo Fetching required local libraries...
