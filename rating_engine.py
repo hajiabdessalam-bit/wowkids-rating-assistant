@@ -117,6 +117,11 @@ class WowkidsRatingSession:
 
     def snapshot(self, label):
         self.park_mouse()
+        # The coach may move the window between polls or while a form loads.
+        self.window_rect = wkcommon.window_rectangle(self.wrapper)
+        self.client_rect = wkcommon.win32_client_rect(self.wrapper)
+        if not self.window_rect or not self.client_rect:
+            raise RuntimeError("WOWKIDS window geometry unavailable")
         path = os.path.join(
             self.shots_dir,
             "{}_{}.png".format(wkcommon.timestamp(), label.replace(" ", "_")),

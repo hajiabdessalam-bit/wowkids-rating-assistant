@@ -126,11 +126,47 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
 
     def live_snapshot(self, label):
         snap = self.snapshot(label)
-        visible = self._visible(snap["nodes"])
+        # Prior Home/popups remain marked visible by Chromium. Only the newest
+        # Page-Frame may provide navigation targets, with pixel checks below.
+        nodes = snap['nodes']
+        frames = [i for i, n in enumerate(nodes) if n.get('control_type') == 'Document'
+                  and n.get('name') == 'Page-Frame']
+        page = []
+        if frames:
+            start = frames[-1]
+            depth = nodes[start]['depth']
+            for node in nodes[start+1:]:
+                if node.get('depth', 0) <= depth:
+                    break
+                page.append(node)
+        visible = self._visible(page)
+        self._navigation_shot = snap['path']
         state, reasons, signals = ctx.classify_live_page(
             visible, None, snap["path"], self.window_rect
         )
+        if state != 'CLASS_ROSTER' and not self._rendered_home(visible):
+            state, visible = 'UNKNOWN', []
+        self.save_diagnostic(snap, 'navigation: ' + state)
         return snap, visible, state, reasons, signals
+
+    def _colour_support(self, node, colour, minimum):
+        try:
+            from PIL import Image
+            image = Image.open(self._navigation_shot).convert('RGB')
+            fractions = ctx._crop_colour_fractions(image, node['rect'], self.window_rect)
+            return bool(fractions and fractions[colour] >= minimum)
+        except Exception:
+            return False
+
+    def _rendered_home(self, visible):
+        # Home header stays visible (dimmed) behind the date modal. Reject
+        # stale Home text underneath a roster or assessment page.
+        return any(
+            (_norm(n.get('name')) == 'switch accounts' and
+             self._colour_support(n, 'orange', 0.40)) or
+            (re.fullmatch(r'\d{2}:\d{2}-\d{2}:\d{2}', _norm_time(n.get('name'))) and
+             self._colour_support(n, 'purple', 0.40))
+            for n in visible)
 
     def _visible_names(self, visible):
         return [_text(node.get("name")) for node in visible if _text(node.get("name"))]
@@ -237,6 +273,9 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
                     "target class month is too far from the displayed calendar"
                 )
 
+            if attempt == max_clicks:
+                break
+
             self._click_point(
                 self._month_arrow_point(-1 if delta < 0 else 1),
                 "calendar month arrow",
@@ -272,8 +311,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             time.sleep(0.25)
         raise RuntimeError("calendar day click did not open the queued date")
 
-    @staticmethod
-    def _popup_has_date(visible, target_date):
+    def _popup_has_date(self, visible, target_date):
         y = target_date.year
         m = target_date.month
         d = target_date.day
@@ -284,7 +322,11 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             "{:04d}/{:02d}/{:02d}".format(y, m, d),
         ]
         names = [_text(node.get("name")) for node in visible]
-        return any(any(token in name for token in compact) for name in names)
+        date_present = any(any(token in name for token in compact) for name in names)
+        # The modal's class bars must actually be purple in this capture.
+        return date_present and any(
+            re.fullmatch(r'\d{2}:\d{2}-\d{2}:\d{2}', _norm_time(n.get('name')))
+            and self._colour_support(n, 'purple', 0.40) for n in visible)
 
     def _class_family_present(self, visible, wanted):
         wanted = _norm(wanted)
@@ -300,7 +342,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         for node in visible:
             name = _norm_time(node.get("name"))
             rect = node.get("rect")
-            if not name or wanted not in name or not rect:
+            if name != wanted or not rect:
                 continue
             if not _inside(rect, self.client_rect, margin=8):
                 continue
@@ -308,6 +350,8 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
                 rect["top"] + rect["height"] // 2 - self.client_rect["top"]
             ) / max(1, self.client_rect["height"])
             if not 0.24 <= rel_y <= 0.72:
+                continue
+            if not self._colour_support(node, 'purple', 0.40):
                 continue
             # Prefer compact text/row nodes around the time itself.
             area = rect["width"] * rect["height"]
@@ -378,6 +422,8 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             name = _norm(node.get("name"))
             rect = node.get("rect")
             if name != "view comments" or not rect:
+                continue
+            if not self._colour_support(node, 'orange', 0.40):
                 continue
             if not _inside(rect, self.client_rect, margin=8):
                 continue

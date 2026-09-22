@@ -588,6 +588,7 @@ def main():
                 continue
 
             rater = HumanLikeRatingSession()
+            rater.wait_for_assessment_ready(student=student)
             if class_categories is None:
                 categories = rater.discover_categories()
                 class_categories = list(categories)

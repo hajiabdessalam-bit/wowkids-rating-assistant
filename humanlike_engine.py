@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
+import re
 import time
 
 import wkcommon
@@ -22,6 +24,59 @@ def abort_pressed():
         )
     except Exception:
         return False
+
+
+def assessment_payload_ready(snap, window_rect, client_rect, student=None):
+    """Require populated identity/lesson in the newest assessment Page-Frame.
+
+    Offscreen ability names establish payload arrival only. Visible lesson and
+    student text must also have ink on the screenshot; stale UIA alone cannot
+    turn a blank shell into a ready form.
+    """
+    from PIL import Image
+    nodes = snap['nodes']
+    frames = [i for i, n in enumerate(nodes)
+              if n.get('control_type') == 'Document' and n.get('name') == 'Page-Frame']
+    if not frames:
+        return False, 'no assessment document'
+    start = frames[-1]
+    depth = nodes[start]['depth']
+    page = []
+    for node in nodes[start + 1:]:
+        if node.get('depth', 0) <= depth:
+            break
+        page.append(node)
+    names = [str(n.get('name') or '').strip() for n in page]
+    if not any('课堂评价' in name or 'assessment' in name.casefold() for name in names):
+        return False, 'assessment page not present'
+    if not ctx._heading_candidates(page):
+        return False, 'lesson abilities have not arrived'
+    visible = [n for n in page if wkcommon.node_is_visibly_present(n, client_rect)[0]]
+    identities = [n for n in visible
+                  if '/' in str(n.get('name') or '') and
+                  len(str(n.get('name')).replace('/', '').strip()) >= 2 and
+                  n['rect']['top'] < client_rect['top'] + 410]
+    if student:
+        identities = [n for n in identities if student.casefold() in n['name'].casefold()]
+    lessons = [n for n in visible if re.search(r'\bLesson\s*\d+|第.+课', n.get('name') or '', re.I)]
+    if not identities or not lessons:
+        return False, 'student identity or lesson header is still empty'
+    try:
+        image = Image.open(snap['path']).convert('RGB')
+        def has_ink(node):
+            r = node['rect']
+            x, y = r['left'] - window_rect['left'], r['top'] - window_rect['top']
+            if x < 0 or y < 0 or x + r['width'] > image.width or y + r['height'] > image.height:
+                return False
+            pixels = list(image.crop((x, y, x+r['width'], y+r['height'])).getdata())
+            ink = sum(max(p) < 170 for p in pixels)
+            white = sum(min(p) > 225 for p in pixels)
+            return ink >= 40 and white > len(pixels) * 0.5
+        if not any(has_ink(n) for n in identities) or not any(has_ink(n) for n in lessons):
+            return False, 'student/lesson text is not rendered yet'
+    except Exception:
+        return False, 'assessment screenshot unavailable'
+    return True, 'student, lesson and ability payload loaded'
 
 
 def _orange_submit_button(screenshot_path, window_rect):
@@ -222,12 +277,50 @@ class HumanLikeRatingSession(_BaseSession):
         for _ in range(6):
             self._scroll(12, settle=0.12)
 
+    def save_diagnostic(self, snap, reason):
+        path = os.path.splitext(snap['path'])[0] + '.json'
+        with open(path, 'w', encoding='utf-8') as output:
+            json.dump({
+                'reason': reason, 'window': self.window_rect,
+                'client': self.client_rect, 'screenshot': snap['path'],
+                'capture': snap.get('capture'), 'support': snap.get('support'),
+                'nodes': wkcommon.without_wrappers(snap['nodes']),
+            }, output, ensure_ascii=False, indent=2)
+        return path
+
+    def wait_for_assessment_ready(self, student=None, timeout=25.0):
+        """Wait for the lesson payload, not merely the empty assessment shell.
+
+        Only a loading gate: score targeting still requires rendered headings
+        and verified visual score rows. No clicks or downward scans here.
+        """
+        self._scroll_to_top()
+        deadline = time.monotonic() + timeout
+        attempt = 0
+        while True:
+            if abort_pressed():
+                raise RuntimeError('STOP pressed (ESC/F10)')
+            snap = self.snapshot('assessment_ready_{:02d}'.format(attempt))
+            ready, reason = assessment_payload_ready(
+                snap, self.window_rect, self.client_rect, student)
+            if ready:
+                return snap
+            if attempt == 0 or time.monotonic() >= deadline:
+                self.save_diagnostic(snap, reason)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    'WOWKIDS assessment did not finish loading: {}. '
+                    'No ratings or Submit were attempted. Diagnostic: {}'.format(
+                        reason, os.path.splitext(snap['path'])[0] + '.json'))
+            attempt += 1
+            time.sleep(0.5)
+
     def discover_categories(self, max_steps=30):
         """Scan the unmodified form and return abilities actually on this lesson.
 
         This phase scrolls only. It does not expand, rate, or submit anything.
         """
-        self._scroll_to_top()
+        self.wait_for_assessment_ready()
         found = []
 
         for step in range(max_steps):
@@ -247,7 +340,9 @@ class HumanLikeRatingSession(_BaseSession):
             raise RuntimeError("could not reach the bottom of the rating form safely")
 
         if not found:
-            raise RuntimeError("no visually verified rating abilities were discovered")
+            diagnostic = self.save_diagnostic(snap, 'no rendered abilities found')
+            raise RuntimeError("no visually verified rating abilities were discovered; "
+                               "diagnostic: {}".format(diagnostic))
 
         # Preserve actual page order from the scan. This intentionally allows a
         # lesson to expose a subset (for example four of the five known skills).
@@ -498,7 +593,7 @@ class HumanLikeRatingSession(_BaseSession):
         if list(scores.keys()) != list(categories):
             raise ValueError("score mapping must match the discovered category order")
 
-        self._scroll_to_top()
+        self.wait_for_assessment_ready()
         results = []
         for category in categories:
             if abort_pressed():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -49,6 +50,19 @@ JOB_SCORE_FOR_CATEGORY = {
 
 ERROR_ALREADY_EXISTS = 183
 MUTEX_NAME = "Local\\WOWKIDSRatingAssistantCloudAgentV4"
+
+
+def _source_version():
+    digest = hashlib.sha256()
+    for name in ('wowkids_cloud_agent.py', 'home_navigator.py', 'class_controller.py',
+                 'humanlike_engine.py', 'rating_engine.py', 'validate_context.py',
+                 'visual_score_rows.py', 'wkcommon.py'):
+        with open(os.path.join(HERE, name), 'rb') as source:
+            digest.update(source.read())
+    return digest.hexdigest()[:16]
+
+
+LOADED_VERSION = _source_version()
 
 
 class ApiError(RuntimeError):
@@ -474,7 +488,7 @@ def _scores_for_categories(item, categories):
 
 
 def _save_status(**fields):
-    data = {"updatedAt": _now()}
+    data = {"updatedAt": _now(), "pid": os.getpid(), "codeVersion": LOADED_VERSION}
     data.update(fields)
     try:
         _write_json(STATUS_PATH, data)
@@ -766,6 +780,7 @@ def process_job(api, job):
             continue
 
         rater = HumanLikeRatingSession()
+        rater.wait_for_assessment_ready(student=matched_name)
         if class_categories is None:
             class_categories = list(rater.discover_categories())
 
@@ -935,6 +950,11 @@ def run_forever():
             # Escape in an unrelated application. ESC/F10 is honored only once
             # an actual WOWKIDS job is active.
             try:
+                # Exit only between jobs. The existing watchdog relaunches us
+                # with fresh imports; never interrupt a student mid-rating.
+                if _source_version() != LOADED_VERSION:
+                    _save_status(state='restarting', message='Loading updated agent code')
+                    return 75
                 response = api.poll()
                 device = response.get("device") or {}
                 jobs = list(response.get("jobs") or [])
