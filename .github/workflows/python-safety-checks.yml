@@ -15,4 +15,4 @@ jobs:
           python-version: '3.12'
       - name: Compile core assistant modules
         run: |
-          python -m py_compile             wowkids_cloud_agent.py             pair_windows_agent.py             class_controller.py             humanlike_engine.py             rating_engine.py             validate_context.py             wkcommon.py             background_workspace.py
+          python -m py_compile             wowkids_cloud_agent.py             pair_windows_agent.py             class_controller.py             humanlike_engine.py             rating_engine.py             validate_context.py             wkcommon.py             vercel_update.py             background_workspace.py
