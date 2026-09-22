@@ -814,6 +814,74 @@ class HumanLikeRatingSession(_BaseSession):
             )
         )
 
+    def discover_and_fill(self, scores, max_steps=36):
+        """Discover and rate the first student in one downward pass.
+
+        The old first-student path scanned all the way to Submit only to learn
+        whether the lesson had 4 or 5 abilities, scrolled back to the top, then
+        traversed the same form again to rate it. This method preserves the
+        same screenshot-backed category and score verification, but rates each
+        newly discovered ability as it is encountered.
+
+        It is used only for the first student in a class. Later students reuse
+        the confirmed category list exactly as before.
+        """
+        self.wait_for_assessment_ready()
+        self._scroll_to_top()
+
+        categories = []
+        results = []
+
+        for step in range(max_steps):
+            if abort_pressed():
+                raise RuntimeError("STOP pressed (ESC/F10)")
+
+            snap = self.snapshot(
+                "discover_fill_{:02d}".format(step)
+            )
+            visible_pairs = self._supported_categories(snap)
+            unseen = [
+                category for category, _node in visible_pairs
+                if category not in categories
+            ]
+
+            if unseen:
+                category = unseen[0]
+                if category not in scores:
+                    raise RuntimeError(
+                        "no queued score is available for discovered ability {}".format(
+                            category
+                        )
+                    )
+                result = self.select_score_humanlike(
+                    category, scores[category]
+                )
+                categories.append(category)
+                results.append(result)
+                continue
+
+            if _orange_submit_button(snap["path"], self.window_rect):
+                if not categories:
+                    diagnostic = self.save_diagnostic(
+                        snap, "no rendered abilities found"
+                    )
+                    raise RuntimeError(
+                        "no visually verified rating abilities were discovered; "
+                        "diagnostic: {}".format(diagnostic)
+                    )
+                return categories, results, snap
+
+            # Small step because an expanded accordion changes the page height.
+            # This avoids skipping a category while still eliminating the old
+            # full dry-run + rewind.
+            self._scroll(-2, settle=0.16)
+
+        raise RuntimeError(
+            "could not discover and rate the first student's abilities safely "
+            "before reaching the scan limit"
+        )
+
+
     def fill_discovered(self, categories, scores):
         if list(scores.keys()) != list(categories):
             raise ValueError("score mapping must match the discovered category order")
