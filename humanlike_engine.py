@@ -283,6 +283,11 @@ class HumanLikeRatingSession(_BaseSession):
     requires every discovered ability to have succeeded first.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._assessment_ready_confirmed = False
+        self._assessment_ready_student = None
+
     def park_mouse(self):
         """Do not move the user's physical cursor just to take screenshots.
 
@@ -373,10 +378,16 @@ class HumanLikeRatingSession(_BaseSession):
     def wait_for_assessment_ready(self, student=None, timeout=25.0):
         """Wait for real lesson content, not merely the empty assessment shell.
 
-        This is only a loading gate. It intentionally does NOT require ability
-        headings to be visible because the proven discovery routine scrolls
-        down to find them afterward.
+        This is a state-based gate, not a fixed delay. Once the current session
+        has verified the student/lesson payload, later discovery/rating steps
+        reuse that proof instead of repeatedly scrolling to the top and waiting
+        again.
         """
+        wanted = str(student or "").strip().casefold()
+        cached = str(self._assessment_ready_student or "").strip().casefold()
+        if self._assessment_ready_confirmed and (not wanted or wanted == cached):
+            return self.snapshot("assessment_ready_cached")
+
         self._scroll_to_top()
         deadline = time.monotonic() + timeout
         attempt = 0
@@ -387,6 +398,8 @@ class HumanLikeRatingSession(_BaseSession):
             ready, reason = assessment_payload_ready(
                 snap, self.window_rect, self.client_rect, student)
             if ready:
+                self._assessment_ready_confirmed = True
+                self._assessment_ready_student = student
                 return snap
             if attempt == 0 or time.monotonic() >= deadline:
                 self.save_diagnostic(snap, reason)
@@ -396,7 +409,7 @@ class HumanLikeRatingSession(_BaseSession):
                     'No ratings or Submit were attempted. Diagnostic: {}'.format(
                         reason, os.path.splitext(snap['path'])[0] + '.json'))
             attempt += 1
-            time.sleep(0.5)
+            time.sleep(0.20)
 
     def discover_categories(self, max_steps=30):
         """Scan the unmodified form and return abilities actually on this lesson.
@@ -602,25 +615,49 @@ class HumanLikeRatingSession(_BaseSession):
         snap = self._position_category(category)
         rows, _reason, _section = self._rows_for_live(snap, category)
         if rows and rows.get("layout") == "vertical-visual":
-            return snap, rows, {"changed": False, "point": None}
+            return snap, rows, {"changed": False, "point": None, "waitSeconds": 0.0}
 
         point = self._description_card_point(snap, category)
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
         self.mouse.click(button="left", coords=point)
-        time.sleep(0.55)
 
-        after = self.snapshot("{}_expanded".format(category))
-        rows_after, reason_after, _section_after = self._rows_for_live(after, category)
-        if not rows_after or rows_after.get("layout") != "vertical-visual":
-            detail = rows_after.get("reason") if rows_after else reason_after
-            raise RuntimeError(
-                "{} did not expose a verified 1..5 star stack: {}".format(
-                    category, detail
-                )
+        # Replace the old fixed 550 ms sleep with a bounded visual wait.
+        started = time.monotonic()
+        deadline = started + 1.50
+        attempt = 0
+        last_after = None
+        last_rows = None
+        last_reason = ""
+        while time.monotonic() < deadline:
+            if abort_pressed():
+                raise RuntimeError("STOP pressed (ESC/F10)")
+            time.sleep(0.07 if attempt == 0 else 0.09)
+            after = self.snapshot(
+                "{}_expanded_{:02d}".format(category, attempt)
             )
+            rows_after, reason_after, _section_after = self._rows_for_live(
+                after, category
+            )
+            last_after, last_rows, last_reason = after, rows_after, reason_after
+            if rows_after and rows_after.get("layout") == "vertical-visual":
+                return after, rows_after, {
+                    "changed": True,
+                    "point": list(point),
+                    "waitSeconds": round(time.monotonic() - started, 3),
+                }
+            attempt += 1
 
-        return after, rows_after, {"changed": True, "point": list(point)}
+        detail = (
+            last_rows.get("reason")
+            if last_rows
+            else last_reason or "timed out waiting for rendered score rows"
+        )
+        raise RuntimeError(
+            "{} did not expose a verified 1..5 star stack: {}".format(
+                category, detail
+            )
+        )
 
     def select_score_humanlike(self, category, score):
         score = int(score)
@@ -650,27 +687,43 @@ class HumanLikeRatingSession(_BaseSession):
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
         self.mouse.click(button="left", coords=point)
-        time.sleep(0.45)
-        after = self.snapshot("{}_score{}_after".format(category, score))
 
-        diff = _crop_diff(
-            baseline["path"], after["path"], point, self.window_rect
-        )
-        if not diff["ok"]:
-            raise RuntimeError(
-                "{} score {} did not produce a verified radio-state change".format(
-                    category, score
-                )
+        # The radio usually paints much faster than the old fixed 450 ms wait.
+        # Continue as soon as the SAME local visual-change check succeeds.
+        started = time.monotonic()
+        deadline = started + 1.00
+        attempt = 0
+        last_after = None
+        last_diff = {"ok": False}
+        while time.monotonic() < deadline:
+            if abort_pressed():
+                raise RuntimeError("STOP pressed (ESC/F10)")
+            time.sleep(0.06 if attempt == 0 else 0.08)
+            after = self.snapshot(
+                "{}_score{}_after_{:02d}".format(category, score, attempt)
             )
+            diff = _crop_diff(
+                baseline["path"], after["path"], point, self.window_rect
+            )
+            last_after, last_diff = after, diff
+            if diff["ok"]:
+                return {
+                    "category": category,
+                    "score": score,
+                    "click_point": list(point),
+                    "expanded_by_run": bool(expand_info["changed"]),
+                    "expand_wait_seconds": expand_info.get("waitSeconds", 0.0),
+                    "score_wait_seconds": round(time.monotonic() - started, 3),
+                    "visual_change": diff,
+                    "left_expanded": True,
+                }
+            attempt += 1
 
-        return {
-            "category": category,
-            "score": score,
-            "click_point": list(point),
-            "expanded_by_run": bool(expand_info["changed"]),
-            "visual_change": diff,
-            "left_expanded": True,
-        }
+        raise RuntimeError(
+            "{} score {} did not produce a verified radio-state change".format(
+                category, score
+            )
+        )
 
     def fill_discovered(self, categories, scores):
         if list(scores.keys()) != list(categories):
@@ -801,7 +854,7 @@ class HumanLikeRatingSession(_BaseSession):
         while time.monotonic() < deadline:
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
-            time.sleep(0.35)
+            time.sleep(0.15)
             attempt += 1
             snap = self.snapshot("after_submit_{:02d}".format(attempt))
             last_snap = snap
