@@ -11,6 +11,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import zipfile
 
 
@@ -59,8 +60,9 @@ def _read_config():
     return token, base_url
 
 
-def _download_archive(token, base_url):
-    url = base_url + "/api/wowkids-update"
+def _download_archive(token, base_url, ref="main"):
+    query = urllib.parse.urlencode({"ref": ref})
+    url = base_url + "/api/wowkids-update?" + query
     req = urllib.request.Request(
         url,
         headers={
@@ -131,13 +133,13 @@ def _archive_files(data):
     return files
 
 
-def _should_skip(rel, background=False):
+def _should_skip(rel, background=False, ref="main"):
     rel = rel.replace("\\", "/")
     if rel in SKIP_ALWAYS:
         return True
     if any(rel.startswith(prefix) for prefix in SKIP_PREFIXES):
         return True
-    if background and rel in BACKGROUND_SKIP:
+    if (background or ref != "main") and rel in BACKGROUND_SKIP:
         return True
     return False
 
@@ -164,10 +166,10 @@ def _prune_backups(keep=4):
         pass
 
 
-def _apply(files, background=False):
+def _apply(files, background=False, ref="main"):
     changed = []
     for rel, payload in files.items():
-        if _should_skip(rel, background=background):
+        if _should_skip(rel, background=background, ref=ref):
             continue
         target = os.path.join(HERE, *rel.split("/"))
         if _same_bytes(target, payload):
@@ -230,13 +232,19 @@ def main(argv=None):
         help="Update only agent runtime files safe to replace under the supervisor.",
     )
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--ref",
+        default="main",
+        choices=("main", "stable-current", "stable-working-2026-09-22"),
+        help="Cloud update channel / rollback branch.",
+    )
     args = parser.parse_args(argv)
 
     token, base_url = _read_config()
-    data, source = _download_archive(token, base_url)
+    data, source = _download_archive(token, base_url, ref=args.ref)
     archive_hash = hashlib.sha256(data).hexdigest()[:12]
     files = _archive_files(data)
-    changed = _apply(files, background=args.background)
+    changed = _apply(files, background=args.background, ref=args.ref)
 
     state = {
         "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -244,6 +252,7 @@ def main(argv=None):
         "archiveHash": archive_hash,
         "changedFiles": changed,
         "background": bool(args.background),
+        "requestedRef": args.ref,
     }
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(
