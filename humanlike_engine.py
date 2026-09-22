@@ -297,19 +297,34 @@ class HumanLikeRatingSession(_BaseSession):
         """
         return
 
-    def click_at(self, point):
-        """Click WOWKIDS without moving or depending on the physical cursor.
+    def _background_target_hwnd(self, point):
+        """Resolve a WOWKIDS child window using only WOWKIDS geometry.
 
-        pywinauto.mouse.click moves the system cursor to the target first. If
-        the coach happens to move the mouse at the same moment, the click can
-        land somewhere else. WeChat's Chromium surface accepts normal Windows
-        button messages, so send the click directly to the child window under
-        the verified target point instead.
-
-        There is deliberately NO physical-mouse fallback here. Every caller
-        already verifies the resulting UI state; if a background click is not
-        accepted, stop safely instead of fighting the user's cursor.
+        Unlike WindowFromPoint, this is unaffected by whatever other app the
+        coach currently has in front of WOWKIDS.
         """
+        import win32gui
+
+        root = int(self.wrapper.handle)
+        x, y = int(point[0]), int(point[1])
+        parent = root
+        for _ in range(8):
+            cx, cy = win32gui.ScreenToClient(parent, (x, y))
+            try:
+                child = win32gui.ChildWindowFromPointEx(
+                    parent,
+                    (cx, cy),
+                    0x0001 | 0x0002 | 0x0004,  # invisible/disabled/transparent
+                )
+            except Exception:
+                child = 0
+            if not child or int(child) == int(parent):
+                break
+            parent = int(child)
+        return parent
+
+    def click_at(self, point):
+        """Click WOWKIDS without moving or depending on the physical cursor."""
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
 
@@ -319,16 +334,10 @@ class HumanLikeRatingSession(_BaseSession):
             import win32con
             import win32gui
 
-            root = int(self.wrapper.handle)
-            hwnd = int(win32gui.WindowFromPoint((x, y)) or root)
-            if hwnd != root and not win32gui.IsChild(root, hwnd):
-                hwnd = root
-
+            hwnd = self._background_target_hwnd((x, y))
             cx, cy = win32gui.ScreenToClient(hwnd, (x, y))
             lparam = win32api.MAKELONG(cx & 0xFFFF, cy & 0xFFFF)
 
-            # Move only the target window's logical mouse state. The real
-            # Windows cursor stays exactly where the user left it.
             win32gui.SendMessage(hwnd, win32con.WM_MOUSEMOVE, 0, lparam)
             win32gui.SendMessage(
                 hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam
@@ -341,18 +350,16 @@ class HumanLikeRatingSession(_BaseSession):
                 "attempted: {}".format(exc)
             )
 
-    def _scroll(self, wheel_dist, settle=0.34):
-        """Scroll WOWKIDS with a background wheel message only.
 
-        We deliberately have NO physical-mouse fallback. If Windows cannot send
-        a background wheel event, fail closed rather than taking control of the
-        user's cursor.
-        """
+    def _scroll(self, wheel_dist, settle=0.34):
+        """Scroll WOWKIDS in the background without touching the real cursor."""
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
 
         x = self.client_rect["left"] + self.client_rect["width"] // 2
-        y = self.client_rect["top"] + min(500, self.client_rect["height"] - 220)
+        y = self.client_rect["top"] + min(
+            500, self.client_rect["height"] - 220
+        )
         wheel_dist = int(wheel_dist)
         delta = wheel_dist * 120
 
@@ -361,16 +368,23 @@ class HumanLikeRatingSession(_BaseSession):
             import win32con
             import win32gui
 
-            hwnd = win32gui.WindowFromPoint((x, y)) or self.wrapper.handle
+            hwnd = self._background_target_hwnd((x, y))
+            # WM_MOUSEWHEEL lParam uses screen coordinates even when sent
+            # directly to a child window.
             wparam = (delta & 0xFFFF) << 16
             lparam = win32api.MAKELONG(x & 0xFFFF, y & 0xFFFF)
-            win32gui.PostMessage(hwnd, win32con.WM_MOUSEWHEEL, wparam, lparam)
+            win32gui.PostMessage(
+                hwnd, win32con.WM_MOUSEWHEEL, wparam, lparam
+            )
         except Exception as exc:
             raise RuntimeError(
-                "background scrolling unavailable; refusing to take over the mouse: {}".format(exc)
+                "background scrolling unavailable; refusing to take over the "
+                "mouse: {}".format(exc)
             )
 
         time.sleep(settle)
+
+
     def capture_only(self, label):
         """Capture rendered pixels without walking Chromium's full UIA tree.
 
