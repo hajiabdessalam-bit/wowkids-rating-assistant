@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import shutil
+import ssl
+import subprocess
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,6 +24,18 @@ CONFIG_PATH = os.path.join(STATE_DIR, "device_config.json")
 STATUS_PATH = os.path.join(STATE_DIR, "cloud_update_status.json")
 BACKUP_ROOT = os.path.join(HERE, "_cloud_update_backups")
 DEFAULT_BASE_URL = "https://feedback-assistant-alpha.vercel.app"
+MAX_ARCHIVE_BYTES = 1_600_000
+
+SKIP_PREFIXES = (
+    ".git/",
+    "reports/",
+    "logs/",
+    "libs/",
+    "__pycache__/",
+    ".venv/",
+    "venv/",
+    "_cloud_update_backups/",
+)
 
 BACKGROUND_SKIP = {
     "wowkids_agent_supervisor.py",
@@ -43,71 +59,188 @@ def _read_config():
     return token, base_url
 
 
-def _request(url, token, accept, timeout=30):
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Accept": accept,
-            "x-wowkids-device-token": token,
-            "User-Agent": "WOWKIDS-Rating-Assistant-Updater/3.0",
-        },
-        method="GET",
-    )
+def _urllib_once(url, token, timeout=60):
+    headers = {
+        "Accept": "application/zip",
+        "x-wowkids-device-token": token,
+        "User-Agent": "WOWKIDS-Rating-Assistant-Updater/4.0",
+        "Connection": "close",
+    }
+    req = urllib.request.Request(url, headers=headers, method="GET")
+
+    context = ssl.create_default_context()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return response.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read(500).decode("utf-8", "replace")
-        raise RuntimeError(
-            "Feedback Assistant update service returned HTTP {}: {}".format(
-                exc.code, detail
-            )
-        )
-    except urllib.error.URLError as exc:
-        raise RuntimeError(
-            "Feedback Assistant update service is unavailable: {}".format(
-                exc.reason
-            )
-        )
-
-
-def _manifest(token, base_url, ref):
-    query = urllib.parse.urlencode({"ref": ref})
-    raw = _request(
-        base_url + "/api/wowkids-update-manifest?" + query,
-        token,
-        "application/json",
-        timeout=30,
-    )
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise RuntimeError("invalid cloud update manifest: {}".format(exc))
-    if not data.get("ok") or not data.get("sha"):
-        raise RuntimeError("cloud update manifest is incomplete")
-    return data
-
-
-def _file_bytes(token, base_url, ref, path):
-    query = urllib.parse.urlencode({"ref": ref, "path": path})
-    data = _request(
-        base_url + "/api/wowkids-update-file?" + query,
-        token,
-        "application/octet-stream",
-        timeout=30,
-    )
-    if len(data) > 220_000:
-        raise RuntimeError("cloud update file is unexpectedly large: {}".format(path))
-    return data
-
-
-def _load_status():
-    try:
-        with open(STATUS_PATH, encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else {}
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
     except Exception:
-        return {}
+        pass
+
+    with urllib.request.urlopen(
+        req,
+        timeout=timeout,
+        context=context,
+    ) as response:
+        data = response.read(MAX_ARCHIVE_BYTES + 1)
+        if len(data) > MAX_ARCHIVE_BYTES:
+            raise RuntimeError("cloud update archive is unexpectedly large")
+        return data
+
+
+def _curl_once(url, token, timeout=90):
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
+        raise RuntimeError("curl.exe is not available")
+
+    fd, cfg_path = tempfile.mkstemp(
+        prefix="wowkids_update_",
+        suffix=".curlcfg",
+    )
+    os.close(fd)
+    fd, out_path = tempfile.mkstemp(
+        prefix="wowkids_update_",
+        suffix=".zip",
+    )
+    os.close(fd)
+
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            fh.write('url = "{}"\n'.format(url.replace('"', "")))
+            fh.write('header = "Accept: application/zip"\n')
+            fh.write(
+                'header = "x-wowkids-device-token: {}"\n'.format(
+                    token.replace('"', "")
+                )
+            )
+            fh.write(
+                'header = "User-Agent: WOWKIDS-Rating-Assistant-Updater/4.0"\n'
+            )
+            fh.write('location\n')
+            fh.write('fail\n')
+            fh.write('silent\n')
+            fh.write('show-error\n')
+            fh.write('http1.1\n')
+            fh.write('connect-timeout = 20\n')
+            fh.write('max-time = {}\n'.format(int(timeout)))
+            fh.write('retry = 3\n')
+            fh.write('retry-all-errors\n')
+            fh.write('output = "{}"\n'.format(out_path.replace("\\", "/")))
+
+        result = subprocess.run(
+            [curl, "--config", cfg_path],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout + 15,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if os.name == "nt"
+                else 0
+            ),
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "curl updater failed: {}".format(
+                    (result.stderr or "").strip()[:300]
+                )
+            )
+
+        with open(out_path, "rb") as fh:
+            data = fh.read(MAX_ARCHIVE_BYTES + 1)
+        if len(data) > MAX_ARCHIVE_BYTES:
+            raise RuntimeError("cloud update archive is unexpectedly large")
+        return data
+    finally:
+        for path in (cfg_path, out_path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+
+def _download_archive(token, base_url, ref):
+    query = urllib.parse.urlencode({"ref": ref})
+    url = base_url + "/api/wowkids-update?" + query
+
+    errors = []
+    for attempt in range(5):
+        try:
+            data = _urllib_once(url, token)
+            if len(data) < 1000 or not data.startswith(b"PK"):
+                raise RuntimeError(
+                    "Feedback Assistant returned an invalid update archive"
+                )
+            return data, "urllib"
+        except Exception as exc:
+            errors.append("urllib {}: {}".format(attempt + 1, exc))
+            if attempt < 4:
+                time.sleep(1.0 + attempt * 1.25)
+
+    # Windows sometimes tears down Python/OpenSSL handshakes while the normal
+    # agent HTTPS traffic still works. curl.exe gives us a separate TLS stack
+    # and HTTP/1.1 fallback without exposing the token on the command line.
+    try:
+        data = _curl_once(url, token)
+        if len(data) < 1000 or not data.startswith(b"PK"):
+            raise RuntimeError(
+                "curl received an invalid update archive"
+            )
+        return data, "curl"
+    except Exception as exc:
+        errors.append("curl: {}".format(exc))
+
+    raise RuntimeError(
+        "all Feedback Assistant update transports failed: {}".format(
+            " | ".join(errors[-3:])
+        )
+    )
+
+
+def _archive_files(data):
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = [
+            name for name in archive.namelist()
+            if name and not name.endswith("/")
+        ]
+        roots = {name.split("/", 1)[0] for name in names if "/" in name}
+        if len(roots) != 1:
+            raise RuntimeError("update archive has an unexpected layout")
+        root = next(iter(roots)) + "/"
+
+        files = {}
+        for name in names:
+            if not name.startswith(root):
+                continue
+            rel = name[len(root):].replace("\\", "/")
+            if not rel or rel.startswith("../") or "/../" in rel:
+                continue
+            if any(rel.startswith(prefix) for prefix in SKIP_PREFIXES):
+                continue
+            files[rel] = archive.read(name)
+
+    required = {
+        "wowkids_cloud_agent.py",
+        "humanlike_engine.py",
+        "rating_engine.py",
+        "class_controller.py",
+        "wkcommon.py",
+    }
+    missing = sorted(required - set(files))
+    if missing:
+        raise RuntimeError(
+            "update archive is missing required files: {}".format(
+                ", ".join(missing)
+            )
+        )
+    return files
+
+
+def _should_skip(rel, background=False, ref="main"):
+    if background and rel in BACKGROUND_SKIP:
+        return True
+    if ref != "main" and rel in BACKGROUND_SKIP:
+        return True
+    return False
 
 
 def _same_bytes(path, payload):
@@ -116,14 +249,6 @@ def _same_bytes(path, payload):
             return fh.read() == payload
     except Exception:
         return False
-
-
-def _skip_path(path, background, ref):
-    if background and path in BACKGROUND_SKIP:
-        return True
-    if ref != "main" and path in BACKGROUND_SKIP:
-        return True
-    return False
 
 
 def _prune_backups(keep=4):
@@ -140,32 +265,62 @@ def _prune_backups(keep=4):
         pass
 
 
-def _install_file(path, payload, backup_root):
-    target = os.path.join(HERE, *path.split("/"))
-    if _same_bytes(target, payload):
-        return False
+def _apply(files, background=False, ref="main"):
+    changed = []
+    for rel, payload in files.items():
+        if _should_skip(rel, background=background, ref=ref):
+            continue
+        target = os.path.join(HERE, *rel.split("/"))
+        if _same_bytes(target, payload):
+            continue
+        changed.append((rel, target, payload))
 
-    if os.path.isfile(target):
-        backup_path = os.path.join(backup_root, *path.split("/"))
-        os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-        shutil.copy2(target, backup_path)
+    if not changed:
+        return []
 
-    os.makedirs(os.path.dirname(target) or HERE, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(
-        prefix=".wowkids_update_",
-        dir=os.path.dirname(target) or HERE,
-    )
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(payload)
-        os.replace(tmp, target)
-    finally:
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    backup = os.path.join(BACKUP_ROOT, stamp)
+    os.makedirs(backup, exist_ok=True)
+
+    for rel, target, _payload in changed:
+        if os.path.isfile(target):
+            backup_path = os.path.join(backup, *rel.split("/"))
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            shutil.copy2(target, backup_path)
+
+    for rel, target, payload in changed:
+        os.makedirs(os.path.dirname(target) or HERE, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            prefix=".wowkids_update_",
+            dir=os.path.dirname(target) or HERE,
+        )
         try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
-    return True
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(payload)
+            os.replace(tmp, target)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+
+    with open(
+        os.path.join(backup, "_changed_files.json"),
+        "w",
+        encoding="utf-8",
+    ) as fh:
+        json.dump(
+            {
+                "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "files": [rel for rel, _target, _payload in changed],
+            },
+            fh,
+            indent=2,
+        )
+
+    _prune_backups()
+    return [rel for rel, _target, _payload in changed]
 
 
 def main(argv=None):
@@ -180,59 +335,37 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     token, base_url = _read_config()
-    manifest = _manifest(token, base_url, args.ref)
-    version = str(manifest.get("sha") or "")
-    files = list(manifest.get("files") or [])
-
-    previous = _load_status()
-    if (
-        args.ref == "main"
-        and previous.get("requestedRef") == args.ref
-        and previous.get("sourceVersion") == version
-    ):
-        if not args.quiet:
-            print("Already up to date.")
-        return 0
-
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    backup = os.path.join(BACKUP_ROOT, stamp)
-    os.makedirs(backup, exist_ok=True)
-
-    changed = []
-    for item in files:
-        path = str(item.get("path") or "")
-        if not path or _skip_path(path, args.background, args.ref):
-            continue
-        payload = _file_bytes(token, base_url, args.ref, path)
-        if _install_file(path, payload, backup):
-            changed.append(path)
-
-    if not changed:
-        shutil.rmtree(backup, ignore_errors=True)
+    data, transport = _download_archive(token, base_url, args.ref)
+    files = _archive_files(data)
+    changed = _apply(
+        files,
+        background=args.background,
+        ref=args.ref,
+    )
 
     os.makedirs(STATE_DIR, exist_ok=True)
     status = {
         "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "feedback-assistant",
-        "sourceVersion": version,
         "requestedRef": args.ref,
         "changedFiles": changed,
         "background": bool(args.background),
+        "transport": transport,
     }
     with open(STATUS_PATH, "w", encoding="utf-8") as fh:
         json.dump(status, fh, indent=2)
 
-    _prune_backups()
-
     if not args.quiet:
         if changed:
             print(
-                "Feedback Assistant update installed ({} file{}).".format(
-                    len(changed), "" if len(changed) == 1 else "s"
+                "Feedback Assistant update installed ({} file{} via {}).".format(
+                    len(changed),
+                    "" if len(changed) == 1 else "s",
+                    transport,
                 )
             )
         else:
-            print("Already up to date.")
+            print("Already up to date via {}.".format(transport))
     return 0
 
 
