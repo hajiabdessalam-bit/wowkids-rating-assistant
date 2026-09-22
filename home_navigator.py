@@ -144,7 +144,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         state, reasons, signals = ctx.classify_live_page(
             visible, None, snap["path"], self.window_rect
         )
-        if state != 'CLASS_ROSTER' and not self._rendered_home(visible):
+        if state != 'CLASS_ROSTER' and not self._rendered_navigation_surface(visible):
             state, visible = 'UNKNOWN', []
         self.save_diagnostic(snap, 'navigation: ' + state)
         return snap, visible, state, reasons, signals
@@ -158,15 +158,58 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         except Exception:
             return False
 
-    def _rendered_home(self, visible):
-        # Home header stays visible (dimmed) behind the date modal. Reject
-        # stale Home text underneath a roster or assessment page.
-        return any(
-            (_norm(n.get('name')) == 'switch accounts' and
-             self._colour_support(n, 'orange', 0.40)) or
-            (re.fullmatch(r'\d{2}:\d{2}-\d{2}:\d{2}', _norm_time(n.get('name'))) and
-             self._colour_support(n, 'purple', 0.40))
-            for n in visible)
+    def _rendered_navigation_surface(self, visible):
+        """Confirm that Home/date-popup pixels are really on screen.
+
+        The expanded class popup can scroll far enough that its time bars leave
+        the viewport. The old gate then threw away the live "View comments"
+        node and navigation could never finish. Accept any of four
+        screenshot-backed navigation signals instead:
+          * orange Switch Accounts on Home;
+          * a purple class-time bar;
+          * a wide purple expanded-student row;
+          * the orange View comments action.
+
+        Stale UIA text alone still cannot pass this gate.
+        """
+        for node in visible:
+            name = _norm(node.get("name"))
+            rect = node.get("rect")
+            if not rect:
+                continue
+
+            if (
+                name == "switch accounts"
+                and self._colour_support(node, "orange", 0.25)
+            ):
+                return True
+
+            if (
+                re.fullmatch(
+                    r"\d{2}:\d{2}-\d{2}:\d{2}",
+                    _norm_time(node.get("name")),
+                )
+                and self._colour_support(node, "purple", 0.30)
+            ):
+                return True
+
+            if (
+                name == "view comments"
+                and self._colour_support(node, "orange", 0.25)
+            ):
+                return True
+
+            # Expanded student rows are broad purple bars. This keeps the
+            # popup live after the class-time header has scrolled out of view.
+            if (
+                _text(node.get("name"))
+                and rect["width"] >= int(self.client_rect["width"] * 0.55)
+                and 22 <= rect["height"] <= 70
+                and self._colour_support(node, "purple", 0.30)
+            ):
+                return True
+
+        return False
 
     def _visible_names(self, visible):
         return [_text(node.get("name")) for node in visible if _text(node.get("name"))]
