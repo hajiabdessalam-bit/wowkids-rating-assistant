@@ -466,7 +466,7 @@ class RosterNavigator(HumanLikeRatingSession):
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
 
-            self.mouse.click(button="left", coords=point)
+            self.click_at(point)
             deadline = time.monotonic() + 3.0
             attempt = 0
             while time.monotonic() < deadline:
