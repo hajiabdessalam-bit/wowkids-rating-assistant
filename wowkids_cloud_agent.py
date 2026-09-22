@@ -749,9 +749,18 @@ def wait_for_matching_roster(api, job):
 
 def process_job(api, job):
     job_id = job["id"]
+    resume_hint = {
+        "_resumeStudentId": job.get("_resumeStudentId"),
+        "_resumeStudentName": job.get("_resumeStudentName"),
+    }
     if job.get("status") == "queued":
         response = api.claim(job_id)
         job = response.get("job") or job
+        # Claiming returns the server copy, so restore the local-only resume
+        # hint discovered from the live assessment page.
+        for key, value in resume_hint.items():
+            if value:
+                job[key] = value
 
     payload = job.get("payload") or {}
     students = list(payload.get("students") or [])
