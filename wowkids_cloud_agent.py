@@ -932,15 +932,45 @@ def _select_runnable_job(response):
             return job, "resuming active rating job"
 
     # First prefer an already-open exact roster.
+    roster_was_open = False
     try:
         nav = RosterNavigator(raise_window=False)
         identity = _roster_identity(nav, label="cloud_pick_job")
+        roster_was_open = bool(identity.get("verifiedRoster"))
         for job in jobs:
             matched, reason = _matches_job(identity, job)
             if matched:
                 return job, reason
     except Exception:
         identity = None
+        roster_was_open = False
+
+    # Batch mode: after one class finishes the screen is still on that class's
+    # roster. If no pending job belongs to this roster, safely use the bottom
+    # Home tab, then let the existing Home -> date -> class navigator handle
+    # the next queued class. This enables several queued classes to run in one
+    # unattended session.
+    if roster_was_open:
+        candidates = [
+            job for job in jobs
+            if job.get("status") in ("queued", "running")
+        ]
+        if candidates:
+            try:
+                home = WowkidsHomeNavigator(raise_window=True)
+                home.go_home_from_roster()
+                running_waiting = [
+                    job for job in candidates
+                    if job.get("status") == "running"
+                ]
+                pool = running_waiting or candidates
+                pool.sort(
+                    key=lambda job: str(job.get("created_at") or ""),
+                    reverse=True,
+                )
+                return pool[0], "completed roster left; opening next queued class"
+            except Exception as exc:
+                return None, "next class is queued but Home transition stopped safely: {}".format(exc)
 
     # If the user has only opened WOWKIDS Home, that is now enough. Use the
     # latest pending intent rather than allowing an old waiting job to block it.
