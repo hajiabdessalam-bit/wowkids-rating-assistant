@@ -1,41 +1,19 @@
 from __future__ import annotations
 
-import json
-import os
-import time
-
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-STATE_DIR = os.path.join(
-    os.environ.get("LOCALAPPDATA") or HERE,
-    "WOWKIDSRatingAssistant",
-)
-REQUEST_PATH = os.path.join(STATE_DIR, "update_requested.json")
+import argparse
 
 
 def main(argv=None):
-    """Compatibility command.
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--background", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--ref", default="main")
+    parser.parse_args(argv)
 
-    Updates are now delivered inside the normal /api/wowkids-device polling
-    response, which is the connection already proven reliable on this PC.
-    This command simply records an immediate-update request and exits cleanly.
-    The running/restarted agent will pick up the server update automatically.
-    """
-    os.makedirs(STATE_DIR, exist_ok=True)
-    try:
-        with open(REQUEST_PATH, "w", encoding="utf-8") as fh:
-            json.dump(
-                {
-                    "requestedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "channel": "agent-poll",
-                },
-                fh,
-                indent=2,
-            )
-    except Exception:
-        pass
-
-    print("Updates are handled automatically through the agent polling channel.")
+    # Updates are now delivered inside the normal /api/wowkids-device poll
+    # response. This file remains only as a compatibility shim for older BATs.
+    if "--quiet" not in (argv or []):
+        print("Updates are delivered automatically through the WOWKIDS job channel.")
     return 0
 
 
