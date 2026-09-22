@@ -13,7 +13,7 @@ from visual_score_rows import detect_visual_score_rows
 
 
 CATEGORY_ORDER = [name for name, _cn in wkcommon.CATEGORY_PAIRS]
-ABORT_KEYS = (0x1B, 0x79)  # ESC or F10
+ABORT_KEYS = (0x79,)  # F10 only; ESC remains free for normal PC use
 
 
 def abort_pressed():
@@ -326,7 +326,7 @@ class HumanLikeRatingSession(_BaseSession):
     def click_at(self, point):
         """Click WOWKIDS without moving or depending on the physical cursor."""
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
 
         x, y = (int(point[0]), int(point[1]))
         try:
@@ -354,7 +354,7 @@ class HumanLikeRatingSession(_BaseSession):
     def _scroll(self, wheel_dist, settle=0.34):
         """Scroll WOWKIDS in the background without touching the real cursor."""
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
 
         x = self.client_rect["left"] + self.client_rect["width"] // 2
         y = self.client_rect["top"] + min(
@@ -478,7 +478,7 @@ class HumanLikeRatingSession(_BaseSession):
         attempt = 0
         while True:
             if abort_pressed():
-                raise RuntimeError('STOP pressed (ESC/F10)')
+                raise RuntimeError('STOP pressed (F10)')
             snap = self.snapshot('assessment_ready_{:02d}'.format(attempt))
             ready, reason = assessment_payload_ready(
                 snap, self.window_rect, self.client_rect, student)
@@ -506,7 +506,7 @@ class HumanLikeRatingSession(_BaseSession):
 
         for step in range(max_steps):
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
 
             snap = self.snapshot("discover_{:02d}".format(step))
             for category, _node in self._supported_categories(snap):
@@ -556,7 +556,7 @@ class HumanLikeRatingSession(_BaseSession):
 
         for attempt in range(max_steps):
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
 
             snap = self.snapshot("{}_position_{:02d}".format(category, attempt))
             visible_pairs = self._supported_categories(snap)
@@ -712,7 +712,7 @@ class HumanLikeRatingSession(_BaseSession):
         heading_rect = dict(heading["rect"])
 
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
         self.click_at(point)
 
         # Pixel-only wait: do not traverse thousands of Chromium UIA nodes
@@ -723,7 +723,7 @@ class HumanLikeRatingSession(_BaseSession):
         last_rows = None
         while time.monotonic() < deadline:
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
             time.sleep(0.05 if attempt == 0 else 0.06)
             after = self.capture_only(
                 "{}_expanded_{:02d}".format(category, attempt)
@@ -862,7 +862,7 @@ class HumanLikeRatingSession(_BaseSession):
             }
 
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
         self.click_at(point)
 
         started = time.monotonic()
@@ -870,7 +870,7 @@ class HumanLikeRatingSession(_BaseSession):
         attempt = 0
         while time.monotonic() < deadline:
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
             time.sleep(0.05 if attempt == 0 else 0.06)
             after = self.capture_only(
                 "{}_score{}_after_{:02d}".format(category, score, attempt)
@@ -928,7 +928,7 @@ class HumanLikeRatingSession(_BaseSession):
 
         for step in range(max_steps):
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
 
             snap = self.snapshot(
                 "discover_fill_{:02d}".format(step)
@@ -984,7 +984,7 @@ class HumanLikeRatingSession(_BaseSession):
         results = []
         for category in categories:
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
             results.append(
                 self.select_score_humanlike(category, scores[category])
             )
@@ -1036,7 +1036,7 @@ class HumanLikeRatingSession(_BaseSession):
         The small roster Post All button can never pass that geometry gate.
         """
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
 
         expected = list(categories)
         actual = [item.get("category") for item in results]
@@ -1058,7 +1058,7 @@ class HumanLikeRatingSession(_BaseSession):
         submit_snap = None
         for _ in range(8):
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
             snap = self.snapshot("submit_live_check")
             rect = _orange_submit_button(snap["path"], self.window_rect)
             if rect and rect["width"] >= int(self.client_rect["width"] * 0.70):
@@ -1086,7 +1086,7 @@ class HumanLikeRatingSession(_BaseSession):
         # Submit uses the same background-click path as every other action.
         # Never steal focus from whatever the coach is doing on the PC.
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
 
         before_path = submit_snap["path"]
         self.click_at((int(cx), int(cy)))
@@ -1102,7 +1102,7 @@ class HumanLikeRatingSession(_BaseSession):
 
         while time.monotonic() < deadline:
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
             time.sleep(0.15)
             attempt += 1
             snap = self.snapshot("after_submit_{:02d}".format(attempt))
