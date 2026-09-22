@@ -608,7 +608,7 @@ def wait_for_matching_roster(api, job):
 
     while True:
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
 
         reason = "waiting for WOWKIDS"
         identity = None
@@ -802,7 +802,7 @@ def process_job(api, job):
 
     for index, item in enumerate(ordered_students, 1):
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
 
         student_id = str(item.get("studentId") or "")
         display_name = _job_student_name(item)
