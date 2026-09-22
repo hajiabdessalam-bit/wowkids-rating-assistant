@@ -35,7 +35,7 @@ if not exist "libs\pywinauto" (
 )
 
 echo Checking the agent files...
-%PYEXE% -m py_compile wowkids_cloud_agent.py wowkids_agent_supervisor.py repair_windows_agent.py pair_windows_agent.py class_controller.py humanlike_engine.py home_navigator.py performance_log.py rating_engine.py
+%PYEXE% -m py_compile wowkids_cloud_agent.py wowkids_agent_supervisor.py repair_windows_agent.py pair_windows_agent.py class_controller.py humanlike_engine.py home_navigator.py performance_log.py rating_engine.py background_workspace.py
 if errorlevel 1 goto fail
 
 %PYEXE% repair_windows_agent.py
