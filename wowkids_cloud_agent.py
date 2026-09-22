@@ -23,6 +23,7 @@ from class_controller import (
     STATUS_RATED,
 )
 from humanlike_engine import HumanLikeRatingSession, abort_pressed
+from home_navigator import WowkidsHomeNavigator
 
 
 STATE_DIR = os.path.join(
@@ -46,7 +47,7 @@ JOB_SCORE_FOR_CATEGORY = {
 }
 
 ERROR_ALREADY_EXISTS = 183
-MUTEX_NAME = "Local\\WOWKIDSRatingAssistantCloudAgentV3"
+MUTEX_NAME = "Local\\WOWKIDSRatingAssistantCloudAgentV4"
 
 
 class ApiError(RuntimeError):
@@ -499,6 +500,7 @@ def wait_for_matching_roster(api, job):
     errors = list((job.get("progress") or {}).get("errors") or [])
     last_cloud_update = 0.0
     last_reason = ""
+    navigation_attempted = False
 
     while True:
         if abort_pressed():
@@ -532,6 +534,90 @@ def wait_for_matching_roster(api, job):
         except Exception as exc:
             reason = "waiting for WOWKIDS: {}".format(exc)
 
+        # New behavior learned from the short 2026-09-22 human demo:
+        # if WOWKIDS is on Home/calendar (or the queued date popup), navigate
+        # date -> class time -> View comments -> roster automatically.
+        if not navigation_attempted:
+            try:
+                passive = WowkidsHomeNavigator(raise_window=False)
+                snap, visible, state, _reasons, _signals = passive.live_snapshot(
+                    "cloud_home_probe"
+                )
+                target_date = passive._popup_has_date(
+                    visible,
+                    __import__("datetime").datetime.strptime(
+                        str(job.get("target_date")), "%Y-%m-%d"
+                    ).date(),
+                )
+                month = passive._calendar_month(visible)
+                navigable = state == "HOME" or month is not None or target_date
+
+                if navigable:
+                    navigation_attempted = True
+                    progress = _job_progress(
+                        "navigating_to_class",
+                        completed,
+                        skipped,
+                        errors,
+                        target={
+                            "date": job.get("target_date"),
+                            "time": job.get("class_time"),
+                            "name": job.get("wowkids_class_name"),
+                        },
+                    )
+                    _send_progress(api, job_id, progress)
+                    _save_status(
+                        state="navigating_to_class",
+                        jobId=job_id,
+                        message="Opening {} {}".format(
+                            job.get("target_date") or "",
+                            job.get("class_time") or "",
+                        ).strip(),
+                    )
+
+                    active = WowkidsHomeNavigator(raise_window=True)
+                    active.navigate_to_roster(job)
+
+                    nav = RosterNavigator(raise_window=False)
+                    identity = _roster_identity(nav, label="after_home_navigation")
+                    matched, reason = _matches_job(identity, job)
+                    if not matched:
+                        raise RuntimeError(
+                            "navigation reached a roster, but it did not match "
+                            "the queued class ({})".format(reason)
+                        )
+
+                    progress = _job_progress(
+                        "class_matched",
+                        completed,
+                        skipped,
+                        errors,
+                        classMatch={
+                            "date": job.get("target_date"),
+                            "time": job.get("class_time"),
+                            "name": job.get("wowkids_class_name"),
+                        },
+                    )
+                    _send_progress(api, job_id, progress)
+                    _save_status(
+                        state="class_matched",
+                        jobId=job_id,
+                        message="Home -> queued class -> roster verified",
+                    )
+                    return nav, identity
+
+            except Exception as exc:
+                if navigation_attempted:
+                    # Once we have begun clicking the calendar, do not loop and
+                    # make a second blind attempt. Fail closed with a useful
+                    # error instead.
+                    raise RuntimeError(
+                        "automatic Home-to-roster navigation stopped safely: {}".format(
+                            exc
+                        )
+                    )
+                reason = "waiting for WOWKIDS: {}".format(exc)
+
         now = time.monotonic()
         if now - last_cloud_update >= 10.0 or reason != last_reason:
             progress = _job_progress(
@@ -556,7 +642,6 @@ def wait_for_matching_roster(api, job):
             last_reason = reason
 
         time.sleep(POLL_WAITING_SECONDS)
-
 
 def process_job(api, job):
     job_id = job["id"]
@@ -755,11 +840,16 @@ def process_job(api, job):
 
 
 def _select_runnable_job(response):
-    """Choose the job whose class is actually open, not merely the oldest job.
+    """Choose a pending job from the page currently visible in WOWKIDS.
 
-    A coach can queue several classes. Older jobs may legitimately stay in
-    waiting_for_class for hours. They must not monopolize the agent and block
-    a newer class that is currently open in WOWKIDS.
+    Priority:
+      1. Resume a job already in the middle of rating.
+      2. If a roster is open, choose the job matching that roster.
+      3. If Home/calendar or a date popup is open, choose the most recently
+         queued/waiting job and navigate to it automatically.
+
+    This prevents an old waiting class from blocking the class the coach just
+    queued and opened WOWKIDS to handle.
     """
     jobs = list(response.get("jobs") or [])
     if not jobs and response.get("job"):
@@ -767,40 +857,58 @@ def _select_runnable_job(response):
     if not jobs:
         return None, "no pending jobs"
 
-    # If a job had already started rating students before a restart, resume it
-    # before considering anything else.
     for job in jobs:
         if job.get("status") != "running":
             continue
         stage = (job.get("progress") or {}).get("stage")
-        if stage not in ("waiting_for_class", "queued"):
+        if stage not in (
+            "waiting_for_class",
+            "queued",
+            "navigating_to_class",
+            "class_matched",
+        ):
             return job, "resuming active rating job"
 
-    # All remaining jobs are queued or merely waiting for their class. Observe
-    # the current roster once and select whichever job matches its identity.
+    # First prefer an already-open exact roster.
     try:
         nav = RosterNavigator(raise_window=False)
         identity = _roster_identity(nav, label="cloud_pick_job")
-    except Exception as exc:
-        return None, "waiting for a WOWKIDS roster: {}".format(exc)
+        for job in jobs:
+            matched, reason = _matches_job(identity, job)
+            if matched:
+                return job, reason
+    except Exception:
+        identity = None
 
-    reasons = []
-    for job in jobs:
-        matched, reason = _matches_job(identity, job)
-        if matched:
-            return job, reason
-        reasons.append(
-            "{} {}: {}".format(
-                job.get("target_date") or "",
-                job.get("class_time") or "",
-                reason,
-            ).strip()
+    # If the user has only opened WOWKIDS Home, that is now enough. Use the
+    # latest pending intent rather than allowing an old waiting job to block it.
+    try:
+        home = WowkidsHomeNavigator(raise_window=False)
+        _snap, visible, state, _reasons, _signals = home.live_snapshot(
+            "cloud_pick_home"
         )
+        month = home._calendar_month(visible)
+        any_popup_date = any(
+            re.search(r"20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日",
+                      _normal_text(node.get("name")))
+            for node in visible
+        )
+        if state == "HOME" or month is not None or any_popup_date:
+            candidates = [
+                job for job in jobs
+                if job.get("status") in ("queued", "running")
+            ]
+            candidates.sort(
+                key=lambda job: str(job.get("created_at") or ""),
+                reverse=True,
+            )
+            if candidates:
+                job = candidates[0]
+                return job, "WOWKIDS Home detected; opening latest queued class"
+    except Exception as exc:
+        return None, "waiting for WOWKIDS Home or matching roster: {}".format(exc)
 
-    return None, "open roster does not match pending jobs ({})".format(
-        " | ".join(reasons[:4])
-    )
-
+    return None, "WOWKIDS is open, but no pending class matches the current page"
 
 def run_forever():
     wkcommon.enable_utf8_stdout()
