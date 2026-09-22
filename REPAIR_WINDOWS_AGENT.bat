@@ -16,7 +16,12 @@ if errorlevel 1 (
   echo Normal Git TLS failed. Retrying with Git's OpenSSL backend...
   git -c http.sslBackend=openssl -c http.version=HTTP/1.1 pull --ff-only
 )
-if errorlevel 1 goto fail
+if errorlevel 1 (
+  echo.
+  echo GitHub update is temporarily unavailable.
+  echo Continuing with the local installed files instead of failing the repair.
+  echo.
+)
 
 set "PYEXE="
 py -3 -c "import sys" >nul 2>nul && set "PYEXE=py -3"
