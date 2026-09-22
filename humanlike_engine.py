@@ -27,14 +27,20 @@ def abort_pressed():
 
 
 def assessment_payload_ready(snap, window_rect, client_rect, student=None):
-    """Return ready only when the live assessment payload is actually rendered.
+    """Verify the assessment shell has real lesson content before discovery.
 
-    WOWKIDS can open an empty assessment shell first and populate the lesson a
-    moment later. Chromium also retains stale Page-Frames, so UIA text alone is
-    not enough. We restrict ourselves to the newest Page-Frame and require the
-    first real ability headings to be corroborated by orange pixels in the
-    screenshot. When a student name is supplied, that identity must also be
-    visibly rendered near the top of the form.
+    IMPORTANT: ability headings are often BELOW the initial viewport. The
+    proven rating engine is responsible for scrolling down and discovering
+    those headings. This gate must therefore never require ability cards to be
+    visible at the top of the page.
+
+    It only rejects the transient blank WOWKIDS shell seen in failed runs:
+      * newest Page-Frame must be the assessment page;
+      * expected student identity, when supplied, must be visibly rendered;
+      * at least one real rendered lesson-content text node must exist below
+        the student card.
+
+    This preserves the older working discovery/rating automation.
     """
     from PIL import Image
 
@@ -67,73 +73,93 @@ def assessment_payload_ready(snap, window_rect, client_rect, student=None):
         if wkcommon.node_is_visibly_present(node, client_rect)[0]
     ]
 
-    # This is the same screenshot-backed evidence used by the proven rating
-    # detector. A blank shell has UIA remnants but no rendered orange headings.
-    _selected, support = ctx._select_visual_heading_nodes(
-        visible, snap["path"], window_rect
-    )
-    supported = {
-        name for name, item in support.items()
-        if item.get("supported")
+    try:
+        image = Image.open(snap["path"]).convert("RGB")
+    except Exception:
+        return False, "assessment screenshot unavailable"
+
+    def has_ink(node, minimum_ink=12):
+        rect = node.get("rect")
+        if not rect:
+            return False
+        x0 = rect["left"] - window_rect["left"]
+        y0 = rect["top"] - window_rect["top"]
+        x1 = x0 + rect["width"]
+        y1 = y0 + rect["height"]
+        if (
+            x0 < 0 or y0 < 0
+            or x1 > image.width or y1 > image.height
+            or x1 <= x0 or y1 <= y0
+        ):
+            return False
+
+        crop = image.crop((x0, y0, x1, y1))
+        total = crop.width * crop.height
+        if not total:
+            return False
+
+        ink = 0
+        light = 0
+        for red, green, blue in crop.getdata():
+            if max(red, green, blue) < 175:
+                ink += 1
+            if min(red, green, blue) > 220:
+                light += 1
+
+        return ink >= minimum_ink and light >= total * 0.20
+
+    # If we know which student was opened, verify that name is not merely a
+    # stale Chromium node but is visibly rendered in the live upper form.
+    if student:
+        wanted = str(student).strip().casefold()
+        identity_nodes = []
+        for node in visible:
+            name = str(node.get("name") or "").strip()
+            rect = node.get("rect")
+            if not name or not rect:
+                continue
+            if rect["top"] >= client_rect["top"] + 430:
+                continue
+            if wanted and wanted in name.casefold():
+                identity_nodes.append(node)
+
+        if not identity_nodes:
+            return False, "student identity is not populated yet"
+        if not any(has_ink(node, minimum_ink=8) for node in identity_nodes):
+            return False, "student identity text is not rendered yet"
+
+    # The blank-shell failure had the assessment title/student shell but no
+    # lesson payload. Require rendered content lower in the form. Do NOT
+    # require ability headings here: they can be far below the fold.
+    ignored_exact = {
+        "in-class assessment",
+        "课堂评价",
+        str(student or "").strip().casefold(),
     }
-    if not (
-        "Making Skills" in supported
-        and "Problem Solving" in supported
-    ):
-        return False, "lesson ability cards are not rendered yet"
-
-    if not student:
-        return True, "assessment ability payload loaded"
-
-    wanted = str(student).strip().casefold()
-    identity_nodes = []
+    content_nodes = []
     for node in visible:
         name = str(node.get("name") or "").strip()
         rect = node.get("rect")
         if not name or not rect:
             continue
-        if rect["top"] >= client_rect["top"] + 430:
+        folded = name.casefold()
+        if folded in ignored_exact:
             continue
-        if wanted and wanted in name.casefold():
-            identity_nodes.append(node)
+        if rect["top"] < client_rect["top"] + 260:
+            continue
+        if rect["top"] >= client_rect["top"] + client_rect["height"] - 70:
+            continue
+        # Real lesson payload can be a lesson title, class/date line, Chinese
+        # lesson text, or descriptive copy. Avoid tiny icon/arrow labels.
+        if len(name) < 4:
+            continue
+        if has_ink(node):
+            content_nodes.append(node)
 
-    if not identity_nodes:
-        return False, "student identity is not populated yet"
+    if not content_nodes:
+        return False, "lesson content is not rendered yet"
 
-    try:
-        image = Image.open(snap["path"]).convert("RGB")
-
-        def has_ink(node):
-            rect = node["rect"]
-            x0 = rect["left"] - window_rect["left"]
-            y0 = rect["top"] - window_rect["top"]
-            x1 = x0 + rect["width"]
-            y1 = y0 + rect["height"]
-            if (
-                x0 < 0 or y0 < 0
-                or x1 > image.width or y1 > image.height
-                or x1 <= x0 or y1 <= y0
-            ):
-                return False
-            crop = image.crop((x0, y0, x1, y1))
-            total = crop.width * crop.height
-            if not total:
-                return False
-            ink = 0
-            light = 0
-            for red, green, blue in crop.getdata():
-                if max(red, green, blue) < 175:
-                    ink += 1
-                if min(red, green, blue) > 220:
-                    light += 1
-            return ink >= 20 and light >= total * 0.35
-
-        if not any(has_ink(node) for node in identity_nodes):
-            return False, "student identity text is not rendered yet"
-    except Exception:
-        return False, "assessment screenshot unavailable"
-
-    return True, "student identity and ability payload loaded"
+    return True, "student and lesson payload loaded"
 
 def _orange_submit_button(screenshot_path, window_rect):
     """Find the large solid orange Submit button from rendered pixels only.
@@ -345,10 +371,11 @@ class HumanLikeRatingSession(_BaseSession):
         return path
 
     def wait_for_assessment_ready(self, student=None, timeout=25.0):
-        """Wait for the lesson payload, not merely the empty assessment shell.
+        """Wait for real lesson content, not merely the empty assessment shell.
 
-        Only a loading gate: score targeting still requires rendered headings
-        and verified visual score rows. No clicks or downward scans here.
+        This is only a loading gate. It intentionally does NOT require ability
+        headings to be visible because the proven discovery routine scrolls
+        down to find them afterward.
         """
         self._scroll_to_top()
         deadline = time.monotonic() + timeout
