@@ -27,57 +27,113 @@ def abort_pressed():
 
 
 def assessment_payload_ready(snap, window_rect, client_rect, student=None):
-    """Require populated identity/lesson in the newest assessment Page-Frame.
+    """Return ready only when the live assessment payload is actually rendered.
 
-    Offscreen ability names establish payload arrival only. Visible lesson and
-    student text must also have ink on the screenshot; stale UIA alone cannot
-    turn a blank shell into a ready form.
+    WOWKIDS can open an empty assessment shell first and populate the lesson a
+    moment later. Chromium also retains stale Page-Frames, so UIA text alone is
+    not enough. We restrict ourselves to the newest Page-Frame and require the
+    first real ability headings to be corroborated by orange pixels in the
+    screenshot. When a student name is supplied, that identity must also be
+    visibly rendered near the top of the form.
     """
     from PIL import Image
-    nodes = snap['nodes']
-    frames = [i for i, n in enumerate(nodes)
-              if n.get('control_type') == 'Document' and n.get('name') == 'Page-Frame']
+
+    nodes = snap["nodes"]
+    frames = [
+        i for i, node in enumerate(nodes)
+        if node.get("control_type") == "Document"
+        and node.get("name") == "Page-Frame"
+    ]
     if not frames:
-        return False, 'no assessment document'
+        return False, "no assessment document"
+
     start = frames[-1]
-    depth = nodes[start]['depth']
+    depth = nodes[start].get("depth", 0)
     page = []
     for node in nodes[start + 1:]:
-        if node.get('depth', 0) <= depth:
+        if node.get("depth", 0) <= depth:
             break
         page.append(node)
-    names = [str(n.get('name') or '').strip() for n in page]
-    if not any('课堂评价' in name or 'assessment' in name.casefold() for name in names):
-        return False, 'assessment page not present'
-    if not ctx._heading_candidates(page):
-        return False, 'lesson abilities have not arrived'
-    visible = [n for n in page if wkcommon.node_is_visibly_present(n, client_rect)[0]]
-    identities = [n for n in visible
-                  if '/' in str(n.get('name') or '') and
-                  len(str(n.get('name')).replace('/', '').strip()) >= 2 and
-                  n['rect']['top'] < client_rect['top'] + 410]
-    if student:
-        identities = [n for n in identities if student.casefold() in n['name'].casefold()]
-    lessons = [n for n in visible if re.search(r'\bLesson\s*\d+|第.+课', n.get('name') or '', re.I)]
-    if not identities or not lessons:
-        return False, 'student identity or lesson header is still empty'
-    try:
-        image = Image.open(snap['path']).convert('RGB')
-        def has_ink(node):
-            r = node['rect']
-            x, y = r['left'] - window_rect['left'], r['top'] - window_rect['top']
-            if x < 0 or y < 0 or x + r['width'] > image.width or y + r['height'] > image.height:
-                return False
-            pixels = list(image.crop((x, y, x+r['width'], y+r['height'])).getdata())
-            ink = sum(max(p) < 170 for p in pixels)
-            white = sum(min(p) > 225 for p in pixels)
-            return ink >= 40 and white > len(pixels) * 0.5
-        if not any(has_ink(n) for n in identities) or not any(has_ink(n) for n in lessons):
-            return False, 'student/lesson text is not rendered yet'
-    except Exception:
-        return False, 'assessment screenshot unavailable'
-    return True, 'student, lesson and ability payload loaded'
 
+    names = [str(node.get("name") or "").strip() for node in page]
+    if not any(
+        "课堂评价" in name or "assessment" in name.casefold()
+        for name in names
+    ):
+        return False, "assessment page not present"
+
+    visible = [
+        node for node in page
+        if wkcommon.node_is_visibly_present(node, client_rect)[0]
+    ]
+
+    # This is the same screenshot-backed evidence used by the proven rating
+    # detector. A blank shell has UIA remnants but no rendered orange headings.
+    _selected, support = ctx._select_visual_heading_nodes(
+        visible, snap["path"], window_rect
+    )
+    supported = {
+        name for name, item in support.items()
+        if item.get("supported")
+    }
+    if not (
+        "Making Skills" in supported
+        and "Problem Solving" in supported
+    ):
+        return False, "lesson ability cards are not rendered yet"
+
+    if not student:
+        return True, "assessment ability payload loaded"
+
+    wanted = str(student).strip().casefold()
+    identity_nodes = []
+    for node in visible:
+        name = str(node.get("name") or "").strip()
+        rect = node.get("rect")
+        if not name or not rect:
+            continue
+        if rect["top"] >= client_rect["top"] + 430:
+            continue
+        if wanted and wanted in name.casefold():
+            identity_nodes.append(node)
+
+    if not identity_nodes:
+        return False, "student identity is not populated yet"
+
+    try:
+        image = Image.open(snap["path"]).convert("RGB")
+
+        def has_ink(node):
+            rect = node["rect"]
+            x0 = rect["left"] - window_rect["left"]
+            y0 = rect["top"] - window_rect["top"]
+            x1 = x0 + rect["width"]
+            y1 = y0 + rect["height"]
+            if (
+                x0 < 0 or y0 < 0
+                or x1 > image.width or y1 > image.height
+                or x1 <= x0 or y1 <= y0
+            ):
+                return False
+            crop = image.crop((x0, y0, x1, y1))
+            total = crop.width * crop.height
+            if not total:
+                return False
+            ink = 0
+            light = 0
+            for red, green, blue in crop.getdata():
+                if max(red, green, blue) < 175:
+                    ink += 1
+                if min(red, green, blue) > 220:
+                    light += 1
+            return ink >= 20 and light >= total * 0.35
+
+        if not any(has_ink(node) for node in identity_nodes):
+            return False, "student identity text is not rendered yet"
+    except Exception:
+        return False, "assessment screenshot unavailable"
+
+    return True, "student identity and ability payload loaded"
 
 def _orange_submit_button(screenshot_path, window_rect):
     """Find the large solid orange Submit button from rendered pixels only.
