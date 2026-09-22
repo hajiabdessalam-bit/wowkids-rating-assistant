@@ -309,7 +309,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
 
     def _click_point(self, point, label, settle=0.65):
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
         x, y = map(int, point)
         if not (
             self.client_rect["left"] + 15 <= x
@@ -709,7 +709,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         # date popup after a supervisor restart.
         for stage in range(10):
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
 
             snap, visible, state, reasons, signals = self.live_snapshot(
                 "nav_state_{:02d}".format(stage)
