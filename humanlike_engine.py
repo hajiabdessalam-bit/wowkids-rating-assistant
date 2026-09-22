@@ -1083,10 +1083,8 @@ class HumanLikeRatingSession(_BaseSession):
                 "refusing Submit: wide button is not in the lower form area"
             )
 
-        # No console confirmation prompt means WOWKIDS can remain foreground.
-        # Raise it immediately before the one real click.
-        wkcommon.restore_window(self.wrapper)
-        time.sleep(0.12)
+        # Submit uses the same background-click path as every other action.
+        # Never steal focus from whatever the coach is doing on the PC.
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
 
@@ -1172,8 +1170,6 @@ class HumanLikeRatingSession(_BaseSession):
                 ):
                     rcx = retry_rect["left"] + retry_rect["width"] // 2
                     rcy = retry_rect["top"] + retry_rect["height"] // 2
-                    wkcommon.restore_window(self.wrapper)
-                    time.sleep(0.08)
                     self.click_at((int(rcx), int(rcy)))
                     before_path = snap["path"]
 
