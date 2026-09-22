@@ -297,6 +297,50 @@ class HumanLikeRatingSession(_BaseSession):
         """
         return
 
+    def click_at(self, point):
+        """Click WOWKIDS without moving or depending on the physical cursor.
+
+        pywinauto.mouse.click moves the system cursor to the target first. If
+        the coach happens to move the mouse at the same moment, the click can
+        land somewhere else. WeChat's Chromium surface accepts normal Windows
+        button messages, so send the click directly to the child window under
+        the verified target point instead.
+
+        There is deliberately NO physical-mouse fallback here. Every caller
+        already verifies the resulting UI state; if a background click is not
+        accepted, stop safely instead of fighting the user's cursor.
+        """
+        if abort_pressed():
+            raise RuntimeError("STOP pressed (ESC/F10)")
+
+        x, y = (int(point[0]), int(point[1]))
+        try:
+            import win32api
+            import win32con
+            import win32gui
+
+            root = int(self.wrapper.handle)
+            hwnd = int(win32gui.WindowFromPoint((x, y)) or root)
+            if hwnd != root and not win32gui.IsChild(root, hwnd):
+                hwnd = root
+
+            cx, cy = win32gui.ScreenToClient(hwnd, (x, y))
+            lparam = win32api.MAKELONG(cx & 0xFFFF, cy & 0xFFFF)
+
+            # Move only the target window's logical mouse state. The real
+            # Windows cursor stays exactly where the user left it.
+            win32gui.SendMessage(hwnd, win32con.WM_MOUSEMOVE, 0, lparam)
+            win32gui.SendMessage(
+                hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam
+            )
+            win32gui.SendMessage(hwnd, win32con.WM_LBUTTONUP, 0, lparam)
+            return
+        except Exception as exc:
+            raise RuntimeError(
+                "background WOWKIDS click unavailable; no physical click was "
+                "attempted: {}".format(exc)
+            )
+
     def _scroll(self, wheel_dist, settle=0.34):
         """Scroll WOWKIDS with a background wheel message only.
 
@@ -620,7 +664,7 @@ class HumanLikeRatingSession(_BaseSession):
         point = self._description_card_point(snap, category)
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
-        self.mouse.click(button="left", coords=point)
+        self.click_at(point)
 
         # Replace the old fixed 550 ms sleep with a bounded visual wait.
         started = time.monotonic()
@@ -840,7 +884,7 @@ class HumanLikeRatingSession(_BaseSession):
             raise RuntimeError("STOP pressed (ESC/F10)")
 
         before_path = submit_snap["path"]
-        self.mouse.click(button="left", coords=(int(cx), int(cy)))
+        self.click_at((int(cx), int(cy)))
         click_issued = True
 
         toast_seen = False
@@ -923,7 +967,7 @@ class HumanLikeRatingSession(_BaseSession):
                     rcy = retry_rect["top"] + retry_rect["height"] // 2
                     wkcommon.restore_window(self.wrapper)
                     time.sleep(0.08)
-                    self.mouse.click(button="left", coords=(int(rcx), int(rcy)))
+                    self.click_at((int(rcx), int(rcy)))
                     before_path = snap["path"]
 
         # We did issue a Submit click, but never observed the success toast or
