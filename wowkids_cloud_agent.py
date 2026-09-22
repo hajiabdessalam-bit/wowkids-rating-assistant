@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import datetime as dt
 import hashlib
+import base64
 import json
 import os
 import re
@@ -40,6 +41,7 @@ STATE_DIR = os.path.join(
 CONFIG_PATH = os.path.join(STATE_DIR, "device_config.json")
 LEGACY_CONFIG_PATH = os.path.join(HERE, "device_config.json")
 STATUS_PATH = os.path.join(STATE_DIR, "agent_status.json")
+UPDATE_STATE_PATH = os.path.join(STATE_DIR, "poll_update_state.json")
 LOG_DIR = os.path.join(HERE, "logs")
 DEFAULT_BASE_URL = "https://feedback-assistant-alpha.vercel.app"
 POLL_IDLE_SECONDS = 15
@@ -88,6 +90,86 @@ def _write_json(path, payload):
     os.replace(tmp, path)
 
 
+def _read_update_state():
+    try:
+        with open(UPDATE_STATE_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_agent_update(payload):
+    """Apply one small source file delivered inside the normal poll response."""
+    if not isinstance(payload, dict):
+        return False
+
+    update_id = str(payload.get("id") or "").strip()
+    path = str(payload.get("path") or "").strip().replace("\\", "/")
+    content_b64 = str(payload.get("contentB64") or "")
+    expected = str(payload.get("sha256") or "").strip().lower()
+    index = int(payload.get("index") or 0)
+    total = int(payload.get("total") or 0)
+
+    if not update_id or not path or not content_b64 or total < 1:
+        return False
+    if path.startswith("../") or "/../" in path or path.startswith("/"):
+        raise RuntimeError("unsafe poll-update path")
+
+    raw = base64.b64decode(content_b64.encode("ascii"))
+    actual = hashlib.sha256(raw).hexdigest()
+    if expected and actual != expected:
+        raise RuntimeError(
+            "poll-update checksum mismatch for {}".format(path)
+        )
+
+    target = os.path.join(HERE, *path.split("/"))
+    os.makedirs(os.path.dirname(target) or HERE, exist_ok=True)
+
+    same = False
+    try:
+        with open(target, "rb") as fh:
+            same = fh.read() == raw
+    except Exception:
+        pass
+
+    if not same:
+        backup_dir = os.path.join(
+            HERE,
+            "_poll_update_backups",
+            time.strftime("%Y%m%d_%H%M%S"),
+        )
+        if os.path.isfile(target):
+            backup_path = os.path.join(
+                backup_dir,
+                *path.split("/"),
+            )
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            try:
+                import shutil
+                shutil.copy2(target, backup_path)
+            except Exception:
+                pass
+
+        tmp = target + ".poll-update.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(raw)
+        os.replace(tmp, target)
+
+    state = _read_update_state()
+    state.update({
+        "updateId": update_id,
+        "nextIndex": index + 1,
+        "lastPath": path,
+        "updatedAt": _now(),
+    })
+    if index + 1 >= total:
+        state["installedId"] = update_id
+        state["nextIndex"] = total
+    _write_json(UPDATE_STATE_PATH, state)
+    return True
+
+
 def _read_config():
     os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -125,10 +207,20 @@ class CloudApi:
 
     def request(self, method="GET", body=None, timeout=10):
         url = self.base_url + "/api/wowkids-device"
+        update_state = _read_update_state()
         headers = {
             "Accept": "application/json",
             "x-wowkids-device-token": self.token,
-            "User-Agent": "WOWKIDS-Rating-Assistant/1.0",
+            "User-Agent": "WOWKIDS-Rating-Assistant/2.0",
+            "x-wowkids-installed-update-id": str(
+                update_state.get("installedId") or ""
+            ),
+            "x-wowkids-update-id": str(
+                update_state.get("updateId") or ""
+            ),
+            "x-wowkids-update-next": str(
+                int(update_state.get("nextIndex") or 0)
+            ),
         }
         data = None
         if body is not None:
@@ -1218,6 +1310,17 @@ def run_forever():
                     _save_status(state='restarting', message='Loading updated agent code')
                     return 75
                 response = api.poll()
+
+                # Updates ride inside the same polling channel that already
+                # works reliably on this PC.
+                if _apply_agent_update(response.get("agentUpdate")):
+                    _save_status(
+                        state="updating",
+                        message="Applying Windows agent update",
+                    )
+                    if _source_version() != LOADED_VERSION:
+                        return 75
+
                 device = response.get("device") or {}
                 jobs = list(response.get("jobs") or [])
                 if not jobs and response.get("job"):
