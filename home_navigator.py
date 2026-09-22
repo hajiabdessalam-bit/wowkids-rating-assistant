@@ -320,7 +320,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             raise RuntimeError("{} click target is outside the safe viewport".format(label))
         wkcommon.restore_window(self.wrapper)
         time.sleep(0.08)
-        self.mouse.click(button="left", coords=(x, y))
+        self.click_at((x, y))
         time.sleep(settle)
 
     def _click_node(self, node, label, settle=0.65):
