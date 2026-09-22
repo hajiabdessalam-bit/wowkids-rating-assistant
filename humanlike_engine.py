@@ -371,6 +371,33 @@ class HumanLikeRatingSession(_BaseSession):
             )
 
         time.sleep(settle)
+    def capture_only(self, label):
+        """Capture rendered pixels without walking Chromium's full UIA tree.
+
+        A full snapshot can traverse thousands of stale WeChat accessibility
+        nodes. For waits that only need pixel proof (star rows / radio-state
+        change), that traversal is unnecessary and was a major latency source.
+        """
+        self.window_rect = wkcommon.window_rectangle(self.wrapper)
+        self.client_rect = wkcommon.win32_client_rect(self.wrapper)
+        if not self.window_rect or not self.client_rect:
+            raise RuntimeError("WOWKIDS window geometry unavailable")
+
+        path = os.path.join(
+            self.shots_dir,
+            "{}_{}.png".format(
+                wkcommon.timestamp(), label.replace(" ", "_")
+            ),
+        )
+        capture_note = wkcommon.capture_window(self.wrapper, path)
+        return {
+            "path": path,
+            "capture": capture_note,
+            "nodes": [],
+            "selected": {},
+            "support": {},
+        }
+
 
     def _supported_categories(self, snap):
         items = []
@@ -662,28 +689,46 @@ class HumanLikeRatingSession(_BaseSession):
             return snap, rows, {"changed": False, "point": None, "waitSeconds": 0.0}
 
         point = self._description_card_point(snap, category)
+        supported = dict(self._supported_categories(snap))
+        heading = supported.get(category)
+        if not heading or not heading.get("rect"):
+            raise RuntimeError(
+                "{} heading geometry disappeared before expansion".format(category)
+            )
+        heading_rect = dict(heading["rect"])
+
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
         self.click_at(point)
 
-        # Replace the old fixed 550 ms sleep with a bounded visual wait.
+        # Pixel-only wait: do not traverse thousands of Chromium UIA nodes
+        # merely to see whether the 1..5 stars have appeared.
         started = time.monotonic()
         deadline = started + 1.50
         attempt = 0
-        last_after = None
         last_rows = None
-        last_reason = ""
         while time.monotonic() < deadline:
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
-            time.sleep(0.07 if attempt == 0 else 0.09)
-            after = self.snapshot(
+            time.sleep(0.05 if attempt == 0 else 0.06)
+            after = self.capture_only(
                 "{}_expanded_{:02d}".format(category, attempt)
             )
-            rows_after, reason_after, _section_after = self._rows_for_live(
-                after, category
+            band_bottom = (
+                self.client_rect["top"]
+                + self.client_rect["height"]
+                - wkcommon.BOTTOM_EXCLUSION_BAND
+                - 4
             )
-            last_after, last_rows, last_reason = after, rows_after, reason_after
+            rows_after = detect_visual_score_rows(
+                after["path"],
+                self.window_rect,
+                heading_rect,
+                band_bottom,
+                self.client_rect,
+                wkcommon.BOTTOM_EXCLUSION_BAND,
+            )
+            last_rows = rows_after
             if rows_after and rows_after.get("layout") == "vertical-visual":
                 return after, rows_after, {
                     "changed": True,
@@ -695,7 +740,7 @@ class HumanLikeRatingSession(_BaseSession):
         detail = (
             last_rows.get("reason")
             if last_rows
-            else last_reason or "timed out waiting for rendered score rows"
+            else "timed out waiting for rendered score rows"
         )
         raise RuntimeError(
             "{} did not expose a verified 1..5 star stack: {}".format(
@@ -743,7 +788,7 @@ class HumanLikeRatingSession(_BaseSession):
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
             time.sleep(0.06 if attempt == 0 else 0.08)
-            after = self.snapshot(
+            after = self.capture_only(
                 "{}_score{}_after_{:02d}".format(category, score, attempt)
             )
             diff = _crop_diff(
