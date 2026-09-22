@@ -24,7 +24,11 @@ from class_controller import (
     STATUS_POSTED,
     STATUS_RATED,
 )
-from humanlike_engine import HumanLikeRatingSession, abort_pressed
+from humanlike_engine import (
+    HumanLikeRatingSession,
+    abort_pressed,
+    assessment_payload_ready,
+)
 from home_navigator import WowkidsHomeNavigator
 from performance_log import StudentPerformance
 
@@ -497,6 +501,80 @@ def _available_scores(item):
     return result
 
 
+def _current_rating_resume_match(jobs):
+    """Match an already-open assessment to one queued student, if unique.
+
+    This lets the coach re-queue after an interruption without manually
+    navigating back to Home/roster. We only resume when the live assessment is
+    screenshot-verified and exactly one unfinished queued student matches it.
+    """
+    try:
+        rater = HumanLikeRatingSession(raise_window=False)
+        snap = rater.snapshot("resume_probe")
+        state, _reasons, _signals = ctx.classify_live_page(
+            rater._visible(snap["nodes"]),
+            None,
+            snap["path"],
+            rater.window_rect,
+        )
+        if state != "RATING_FORM":
+            return None
+    except Exception:
+        return None
+
+    matches = []
+    for job in jobs:
+        if job.get("status") not in ("queued", "running"):
+            continue
+        progress = job.get("progress") or {}
+        completed_ids = {
+            str(item.get("studentId") or "")
+            for item in progress.get("completed") or []
+            if isinstance(item, dict)
+        }
+        payload = job.get("payload") or {}
+        for item in payload.get("students") or []:
+            student_id = str(item.get("studentId") or "")
+            if student_id and student_id in completed_ids:
+                continue
+
+            names = []
+            for value in (item.get("name"), item.get("cn")):
+                name = str(value or "").strip()
+                if name and name not in names:
+                    names.append(name)
+
+            for name in names:
+                ready, _reason = assessment_payload_ready(
+                    snap,
+                    rater.window_rect,
+                    rater.client_rect,
+                    student=name,
+                )
+                if ready:
+                    matches.append((job, item, name))
+                    break
+
+    # Same live student must never silently choose between two classes/jobs.
+    unique = []
+    seen = set()
+    for job, item, name in matches:
+        key = (str(job.get("id")), str(item.get("studentId") or ""), name)
+        if key not in seen:
+            seen.add(key)
+            unique.append((job, item, name))
+
+    if len(unique) != 1:
+        return None
+
+    job, item, name = unique[0]
+    resumed = dict(job)
+    resumed["_resumeStudentId"] = str(item.get("studentId") or "")
+    resumed["_resumeStudentName"] = name
+    return resumed
+
+
+
 
 def _save_status(**fields):
     data = {"updatedAt": _now(), "pid": os.getpid(), "codeVersion": LOADED_VERSION}
@@ -690,10 +768,30 @@ def process_job(api, job):
         if isinstance(item, dict)
     }
 
-    wait_for_matching_roster(api, job)
-    class_categories = None
+    resume_student_id = str(job.get("_resumeStudentId") or "")
+    resume_student_name = str(job.get("_resumeStudentName") or "").strip()
 
-    for index, item in enumerate(students, 1):
+    if not resume_student_id:
+        wait_for_matching_roster(api, job)
+
+    known_categories = previous_progress.get("classCategories") or []
+    class_categories = list(known_categories) if known_categories else None
+
+    ordered_students = list(students)
+    if resume_student_id:
+        resume_items = [
+            item for item in students
+            if str(item.get("studentId") or "") == resume_student_id
+        ]
+        if resume_items:
+            ordered_students = resume_items + [
+                item for item in students
+                if str(item.get("studentId") or "") != resume_student_id
+            ]
+
+    resume_consumed = False
+
+    for index, item in enumerate(ordered_students, 1):
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
 
@@ -729,83 +827,107 @@ def process_job(api, job):
             ),
         )
 
-        with perf.phase("roster_ready"):
-            nav = RosterNavigator(raise_window=False)
-            nav.wait_for_roster(timeout=12.0)
-            matched, reason = _matches_job(_roster_identity(nav), job)
-            if not matched:
-                # Do not rate a student if the user navigated away to another class.
-                nav, _identity = wait_for_matching_roster(api, job)
+        is_resume_current = (
+            bool(resume_student_id)
+            and not resume_consumed
+            and student_id == resume_student_id
+        )
 
-        with perf.phase("student_lookup"):
-            matched_name, match = _find_job_student(nav, item)
-        if not match:
-            skipped_item = {
-                "studentId": student_id,
-                "name": display_name,
-                "reason": "not found on the matched WOWKIDS roster",
-            }
-            skipped.append(skipped_item)
-            perf.finish("skipped_not_found")
+        if is_resume_current:
+            matched_name = resume_student_name or display_name
+            resume_consumed = True
+            perf.note("resumedFromOpenAssessment", True)
             _send_progress(
                 api,
                 job_id,
                 _job_progress(
-                    "rating",
+                    "resuming_current_student",
                     completed,
                     skipped,
                     errors,
-                    currentStudent=None,
+                    currentStudent=display_name,
                     currentIndex=index,
-                    totalStudents=len(students),
+                    totalStudents=len(ordered_students),
                 ),
             )
-            continue
+        else:
+            with perf.phase("roster_ready"):
+                nav = RosterNavigator(raise_window=False)
+                nav.wait_for_roster(timeout=12.0)
+                matched, reason = _matches_job(_roster_identity(nav), job)
+                if not matched:
+                    # Do not rate a student if the user navigated away to another class.
+                    nav, _identity = wait_for_matching_roster(api, job)
 
-        status = match.get("status")
-        if status == STATUS_POSTED:
-            skipped.append(
-                {
+            with perf.phase("student_lookup"):
+                matched_name, match = _find_job_student(nav, item)
+            if not match:
+                skipped_item = {
                     "studentId": student_id,
                     "name": display_name,
-                    "reason": "already Posted",
+                    "reason": "not found on the matched WOWKIDS roster",
                 }
-            )
-            perf.finish("skipped_posted")
-            continue
-        if status == STATUS_RATED:
-            skipped.append(
-                {
-                    "studentId": student_id,
-                    "name": display_name,
-                    "reason": "already Rated",
-                }
-            )
-            perf.finish("skipped_rated")
-            continue
-        if status != STATUS_NOT_RATING:
-            skipped.append(
-                {
-                    "studentId": student_id,
-                    "name": display_name,
-                    "reason": "roster status was not safely verified",
-                }
-            )
-            perf.finish("skipped_unknown_status")
-            continue
+                skipped.append(skipped_item)
+                perf.finish("skipped_not_found")
+                _send_progress(
+                    api,
+                    job_id,
+                    _job_progress(
+                        "rating",
+                        completed,
+                        skipped,
+                        errors,
+                        currentStudent=None,
+                        currentIndex=index,
+                        totalStudents=len(ordered_students),
+                    ),
+                )
+                continue
 
-        with perf.phase("open_student"):
-            opened = nav.open_student(matched_name, match)
-        if not opened.get("opened"):
-            skipped.append(
-                {
-                    "studentId": student_id,
-                    "name": display_name,
-                    "reason": opened.get("reason") or "student did not open",
-                }
-            )
-            perf.finish("skipped_not_opened")
-            continue
+            status = match.get("status")
+            if status == STATUS_POSTED:
+                skipped.append(
+                    {
+                        "studentId": student_id,
+                        "name": display_name,
+                        "reason": "already Posted",
+                    }
+                )
+                perf.finish("skipped_posted")
+                continue
+            if status == STATUS_RATED:
+                skipped.append(
+                    {
+                        "studentId": student_id,
+                        "name": display_name,
+                        "reason": "already Rated",
+                    }
+                )
+                perf.finish("skipped_rated")
+                continue
+            if status != STATUS_NOT_RATING:
+                skipped.append(
+                    {
+                        "studentId": student_id,
+                        "name": display_name,
+                        "reason": "roster status was not safely verified",
+                    }
+                )
+                perf.finish("skipped_unknown_status")
+                continue
+
+            with perf.phase("open_student"):
+                opened = nav.open_student(matched_name, match)
+            if not opened.get("opened"):
+                skipped.append(
+                    {
+                        "studentId": student_id,
+                        "name": display_name,
+                        "reason": opened.get("reason") or "student did not open",
+                    }
+                )
+                perf.finish("skipped_not_opened")
+                continue
 
         rater = HumanLikeRatingSession(raise_window=False)
         with perf.phase("assessment_load"):
@@ -918,6 +1040,10 @@ def _select_runnable_job(response):
         jobs = [response["job"]]
     if not jobs:
         return None, "no pending jobs"
+
+    resumed = _current_rating_resume_match(jobs)
+    if resumed:
+        return resumed, "resuming the student assessment already open"
 
     for job in jobs:
         if job.get("status") != "running":
