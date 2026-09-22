@@ -11,6 +11,11 @@ echo.
 
 echo Updating the local assistant...
 git pull --ff-only
+if errorlevel 1 (
+  echo.
+  echo Normal Git TLS failed. Retrying with Git's OpenSSL backend...
+  git -c http.sslBackend=openssl -c http.version=HTTP/1.1 pull --ff-only
+)
 if errorlevel 1 goto fail
 
 set "PYEXE="
