@@ -31,10 +31,6 @@ from humanlike_engine import (
 )
 from home_navigator import WowkidsHomeNavigator
 from performance_log import StudentPerformance
-from background_workspace import (
-    enable_for_current_wowkids,
-    recover_previous_workspace_mode,
-)
 
 
 STATE_DIR = os.path.join(
@@ -65,8 +61,7 @@ def _source_version():
     digest = hashlib.sha256()
     for name in ('wowkids_cloud_agent.py', 'home_navigator.py', 'class_controller.py',
                  'humanlike_engine.py', 'rating_engine.py', 'validate_context.py',
-                 'visual_score_rows.py', 'wkcommon.py', 'performance_log.py',
-                 'background_workspace.py'):
+                 'visual_score_rows.py', 'wkcommon.py', 'performance_log.py'):
         with open(os.path.join(HERE, name), 'rb') as source:
             digest.update(source.read())
     return digest.hexdigest()[:16]
@@ -507,36 +502,85 @@ def _available_scores(item):
 
 
 def _current_rating_resume_match(jobs):
-    """Match an already-open assessment to one queued student, if unique.
+    """Resume safely from an assessment page at ANY vertical position.
 
-    This lets the coach re-queue after an interruption without manually
-    navigating back to Home/roster. We only resume when the live assessment is
-    screenshot-verified and exactly one unfinished queued student matches it.
+    A stopped rating can leave the form midway down, where the student/date
+    header is no longer visible and the normal page classifier may be UNKNOWN.
+    Normalize the assessment to the top first, then identify the live student,
+    date and class time before choosing a queued job.
+
+    Scrolling an unrelated HOME/roster page to its top is harmless and lets
+    the normal selector continue if this is not an assessment.
     """
     try:
         rater = HumanLikeRatingSession(raise_window=False)
-        snap = rater.snapshot("resume_probe")
+
+        # The key recovery behavior: always normalize the current mini-app view
+        # before trying to identify it. This exposes the student card and the
+        # lesson/date/time line shown at the top of every assessment.
+        rater._scroll_to_top()
+        snap = rater.snapshot("resume_probe_top")
+        visible = rater._visible(snap["nodes"])
+
         state, _reasons, _signals = ctx.classify_live_page(
-            rater._visible(snap["nodes"]),
+            visible,
             None,
             snap["path"],
             rater.window_rect,
         )
-        if state != "RATING_FORM":
+
+        # Mid-rating pages can still classify UNKNOWN because the ability
+        # headings are below the fold. The assessment payload verifier is the
+        # stronger signal at the normalized top, so do not require
+        # state == RATING_FORM here.
+        page_texts = [
+            _normal_text(node.get("name"))
+            for node in visible
+            if _normal_text(node.get("name"))
+        ]
+        joined = " | ".join(page_texts)
+        has_assessment_marker = (
+            "课堂评价" in joined
+            or "in-class assessment" in joined.casefold()
+        )
+        if state != "RATING_FORM" and not has_assessment_marker:
             return None
     except Exception:
         return None
+
+    dates = sorted(set(re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", joined)))
+    times = sorted(set(
+        _normal_time(match)
+        for match in re.findall(
+            r"\b\d{1,2}:\d{2}\s*[-–—~～]\s*\d{1,2}:\d{2}\b",
+            joined,
+        )
+    ))
 
     matches = []
     for job in jobs:
         if job.get("status") not in ("queued", "running"):
             continue
+
+        target_date = str(job.get("target_date") or "").strip()
+        target_time = _normal_time(job.get("class_time") or "")
+
+        # The screenshot the user showed exposes both values at the top of the
+        # lesson card. Use them to disambiguate same-name students/classes.
+        if target_date:
+            if len(dates) != 1 or dates[0] != target_date:
+                continue
+        if target_time:
+            if len(times) != 1 or times[0] != target_time:
+                continue
+
         progress = job.get("progress") or {}
         completed_ids = {
             str(item.get("studentId") or "")
             for item in progress.get("completed") or []
             if isinstance(item, dict)
         }
+
         payload = job.get("payload") or {}
         for item in payload.get("students") or []:
             student_id = str(item.get("studentId") or "")
@@ -560,7 +604,8 @@ def _current_rating_resume_match(jobs):
                     matches.append((job, item, name))
                     break
 
-    # Same live student must never silently choose between two classes/jobs.
+    # Never guess. Resume only when top-of-form identity gives one unique
+    # queued student/job combination.
     unique = []
     seen = set()
     for job, item, name in matches:
@@ -576,8 +621,9 @@ def _current_rating_resume_match(jobs):
     resumed = dict(job)
     resumed["_resumeStudentId"] = str(item.get("studentId") or "")
     resumed["_resumeStudentName"] = name
+    resumed["_resumeMatchedDate"] = dates[0] if len(dates) == 1 else ""
+    resumed["_resumeMatchedTime"] = times[0] if len(times) == 1 else ""
     return resumed
-
 
 
 
@@ -1149,12 +1195,6 @@ def run_forever():
     os.makedirs(LOG_DIR, exist_ok=True)
     os.makedirs(STATE_DIR, exist_ok=True)
 
-    # If the previous agent was killed mid-job, restore the WOWKIDS window
-    # before doing anything else. This prevents a crash from leaving the mini
-    # program nearly transparent/click-through.
-    recover_previous_workspace_mode()
-    workspace_guard = None
-
     config = _read_config()
     api = CloudApi(config)
     mutex = _named_mutex_or_exit()
@@ -1184,12 +1224,6 @@ def run_forever():
                     jobs = [response["job"]]
 
                 if not jobs:
-                    if workspace_guard is not None:
-                        try:
-                            workspace_guard.restore()
-                        except Exception:
-                            pass
-                        workspace_guard = None
                     _save_status(
                         state="idle",
                         device=device.get("name"),
@@ -1197,22 +1231,6 @@ def run_forever():
                     )
                     time.sleep(POLL_IDLE_SECONDS)
                     continue
-
-                # Once work is waiting, keep WOWKIDS rendered without taking
-                # over the user's desktop. The window stays topmost only in an
-                # almost-transparent, click-through, non-activating form.
-                if workspace_guard is None:
-                    workspace_guard, workspace_reason = (
-                        enable_for_current_wowkids()
-                    )
-                    if workspace_guard is not None:
-                        _save_status(
-                            state="workspace_mode",
-                            device=device.get("name"),
-                            pendingJobs=len(jobs),
-                            message=workspace_reason,
-                            workspaceMode="transparent-click-through",
-                        )
 
                 job, selection_reason = _select_runnable_job(response)
                 if not job:
@@ -1297,11 +1315,6 @@ def run_forever():
                 )
                 time.sleep(POLL_IDLE_SECONDS)
     finally:
-        if workspace_guard is not None:
-            try:
-                workspace_guard.restore()
-            except Exception:
-                pass
         try:
             ctypes.windll.kernel32.CloseHandle(mutex)
         except Exception:
