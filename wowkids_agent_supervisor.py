@@ -19,6 +19,7 @@ ERROR_ALREADY_EXISTS = 183
 SUPERVISOR_MUTEX = "Local\\WOWKIDSRatingAssistantSupervisorV2"
 STALE_AGENT_SECONDS = 95
 CHECK_EVERY_SECONDS = 8
+UPDATE_EVERY_SECONDS = 300
 
 
 def _stamp():
@@ -75,20 +76,44 @@ def _hidden_flags():
 
 
 def _silent_git_pull():
-    try:
-        result = subprocess.run(
-            ["git", "pull", "--ff-only"],
-            cwd=HERE,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=45,
-            creationflags=_hidden_flags(),
-            check=False,
-        )
-        _log("git pull exit code {}".format(result.returncode))
-    except Exception as exc:
-        _log("git pull skipped/failed: {}".format(exc))
+    """Best-effort background update with Schannel -> OpenSSL fallback."""
+    commands = [
+        ["git", "pull", "--ff-only"],
+        [
+            "git", "-c", "http.sslBackend=openssl",
+            "-c", "http.version=HTTP/1.1",
+            "pull", "--ff-only",
+        ],
+    ]
+    last_code = None
+    for index, command in enumerate(commands):
+        try:
+            result = subprocess.run(
+                command,
+                cwd=HERE,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=45,
+                creationflags=_hidden_flags(),
+                check=False,
+            )
+            last_code = result.returncode
+            if result.returncode == 0:
+                _log(
+                    "git pull succeeded{}".format(
+                        " with OpenSSL fallback" if index else ""
+                    )
+                )
+                return True
+        except Exception as exc:
+            _log(
+                "git pull attempt {} failed: {}".format(
+                    index + 1, exc
+                )
+            )
+    _log("git pull failed; last exit code {}".format(last_code))
+    return False
 
 
 def _run_agent():
@@ -138,6 +163,7 @@ def main():
     _log("supervisor started")
     try:
         _silent_git_pull()
+        last_update_check = time.monotonic()
 
         while True:
             proc = None
@@ -148,6 +174,14 @@ def main():
 
                 while proc.poll() is None:
                     time.sleep(CHECK_EVERY_SECONDS)
+
+                    if (
+                        time.monotonic() - last_update_check
+                        >= UPDATE_EVERY_SECONDS
+                    ):
+                        _silent_git_pull()
+                        last_update_check = time.monotonic()
+
                     age = _status_age_seconds()
 
                     # Give a fresh agent enough time for its first API poll.
