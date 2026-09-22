@@ -762,6 +762,55 @@ class HumanLikeRatingSession(_BaseSession):
             )
         )
 
+    def _selected_score_from_rows(self, screenshot_path, rows):
+        """Return the confidently selected radio row, or None.
+
+        This makes score selection idempotent for resume/retry. We inspect only
+        a tiny center crop around each verified radio target. If the evidence
+        is ambiguous we return None and keep the normal verified click path.
+        """
+        try:
+            from PIL import Image
+            image = Image.open(screenshot_path).convert("RGB")
+        except Exception:
+            return None
+
+        ranked = []
+        for row in rows.get("rows", []):
+            point = row.get("click_point")
+            if not point:
+                continue
+            cx = int(point[0] - self.window_rect["left"])
+            cy = int(point[1] - self.window_rect["top"])
+            saturated = orange = dark = 0
+            for y in range(max(0, cy - 5), min(image.height, cy + 6)):
+                for x in range(max(0, cx - 5), min(image.width, cx + 6)):
+                    red, green, blue = image.getpixel((x, y))
+                    high = max(red, green, blue)
+                    low = min(red, green, blue)
+                    if high - low >= 48 and high >= 110:
+                        saturated += 1
+                    if (
+                        red >= 175
+                        and red >= green + 35
+                        and red >= blue + 55
+                    ):
+                        orange += 1
+                    if high <= 105:
+                        dark += 1
+
+            evidence = orange * 3 + saturated + dark * 0.15
+            ranked.append((evidence, int(row.get("score") or 0)))
+
+        if len(ranked) != 5:
+            return None
+        ranked.sort(reverse=True)
+        best, second = ranked[0], ranked[1]
+        if best[0] < 5.0 or best[0] < second[0] + 3.0:
+            return None
+        return best[1] if 1 <= best[1] <= 5 else None
+
+
     def select_score_humanlike(self, category, score):
         score = int(score)
         if category not in CATEGORY_ORDER:
@@ -771,7 +820,9 @@ class HumanLikeRatingSession(_BaseSession):
 
         _expanded, rows, expand_info = self.ensure_expanded_humanlike(category)
         if len(rows.get("rows", [])) != 5:
-            raise RuntimeError("{} does not have five verified score rows".format(category))
+            raise RuntimeError(
+                "{} does not have five verified score rows".format(category)
+            )
 
         point = tuple(rows["rows"][score - 1]["click_point"])
         safe_bottom = (
@@ -784,46 +835,75 @@ class HumanLikeRatingSession(_BaseSession):
             < self.client_rect["left"] + self.client_rect["width"]
             and self.client_rect["top"] <= point[1] < safe_bottom
         ):
-            raise RuntimeError("{} score target is outside safe area".format(category))
+            raise RuntimeError(
+                "{} score target is outside safe area".format(category)
+            )
 
-        baseline = self.snapshot("{}_score{}_baseline".format(category, score))
+        baseline = self.capture_only(
+            "{}_score{}_baseline".format(category, score)
+        )
+        already_selected = self._selected_score_from_rows(
+            baseline["path"], rows
+        )
+        if already_selected == score:
+            return {
+                "category": category,
+                "score": score,
+                "click_point": list(point),
+                "expanded_by_run": bool(expand_info["changed"]),
+                "expand_wait_seconds": expand_info.get("waitSeconds", 0.0),
+                "score_wait_seconds": 0.0,
+                "visual_change": {
+                    "ok": True,
+                    "reason": "desired score was already selected",
+                },
+                "left_expanded": True,
+                "already_selected": True,
+            }
+
         if abort_pressed():
             raise RuntimeError("STOP pressed (ESC/F10)")
-        self.mouse.click(button="left", coords=point)
+        self.click_at(point)
 
-        # The radio usually paints much faster than the old fixed 450 ms wait.
-        # Continue as soon as the SAME local visual-change check succeeds.
         started = time.monotonic()
         deadline = started + 1.00
         attempt = 0
-        last_after = None
-        last_diff = {"ok": False}
         while time.monotonic() < deadline:
             if abort_pressed():
                 raise RuntimeError("STOP pressed (ESC/F10)")
-            time.sleep(0.06 if attempt == 0 else 0.08)
+            time.sleep(0.05 if attempt == 0 else 0.06)
             after = self.capture_only(
                 "{}_score{}_after_{:02d}".format(category, score, attempt)
             )
             diff = _crop_diff(
                 baseline["path"], after["path"], point, self.window_rect
             )
-            last_after, last_diff = after, diff
-            if diff["ok"]:
+            selected_now = self._selected_score_from_rows(
+                after["path"], rows
+            )
+            if diff["ok"] or selected_now == score:
+                if not diff["ok"]:
+                    diff = {
+                        "ok": True,
+                        "reason": "desired radio is visually selected",
+                    }
                 return {
                     "category": category,
                     "score": score,
                     "click_point": list(point),
                     "expanded_by_run": bool(expand_info["changed"]),
                     "expand_wait_seconds": expand_info.get("waitSeconds", 0.0),
-                    "score_wait_seconds": round(time.monotonic() - started, 3),
+                    "score_wait_seconds": round(
+                        time.monotonic() - started, 3
+                    ),
                     "visual_change": diff,
                     "left_expanded": True,
+                    "already_selected": False,
                 }
             attempt += 1
 
         raise RuntimeError(
-            "{} score {} did not produce a verified radio-state change".format(
+            "{} score {} did not produce a verified selected state".format(
                 category, score
             )
         )
