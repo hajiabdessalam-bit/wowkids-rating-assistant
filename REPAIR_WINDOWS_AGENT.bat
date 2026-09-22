@@ -6,9 +6,9 @@ echo ============================================================
 echo WOWKIDS WINDOWS AGENT - NO-KEY REPAIR
 echo ============================================================
 echo.
-echo Updates are now delivered through the normal agent connection.
-echo GitHub and a separate updater connection are NOT required.
-echo Your saved pairing will NOT be changed.
+echo This keeps your existing pairing.
+echo Updates arrive automatically through the normal WOWKIDS connection.
+echo GitHub is NOT required on this PC.
 echo.
 
 set "PYEXE="
