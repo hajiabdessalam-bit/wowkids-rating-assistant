@@ -76,7 +76,8 @@ def _hidden_flags():
 
 
 def _silent_cloud_update():
-    """Updates are delivered by wowkids_cloud_agent.py via its normal poll."""
+    # Updates are delivered by the cloud agent through its normal polling
+    # channel. The supervisor only restarts the agent when it exits.
     return True
 
 
