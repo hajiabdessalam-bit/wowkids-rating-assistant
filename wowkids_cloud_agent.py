@@ -1320,6 +1320,11 @@ def run_forever():
                     )
                     if _source_version() != LOADED_VERSION:
                         return 75
+                    # Non-runtime files (BATs/supervisor/helpers) do not affect
+                    # LOADED_VERSION. Poll again immediately so a full update
+                    # finishes in seconds instead of one file every idle cycle.
+                    time.sleep(0.20)
+                    continue
 
                 device = response.get("device") or {}
                 jobs = list(response.get("jobs") or [])
