@@ -318,8 +318,6 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             < self.client_rect["top"] + self.client_rect["height"] - 55
         ):
             raise RuntimeError("{} click target is outside the safe viewport".format(label))
-        wkcommon.restore_window(self.wrapper)
-        time.sleep(0.08)
         self.click_at((x, y))
         time.sleep(settle)
 
