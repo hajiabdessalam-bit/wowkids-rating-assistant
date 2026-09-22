@@ -1073,7 +1073,32 @@ def run_forever():
                     message = str(exc)
                     trace = traceback.format_exc()
                     try:
-                        progress = (job.get("progress") or {}).copy()
+                        # Preserve progress already reported by successful
+                        # students in this same batch. The older failure path
+                        # reused the stale job object from before processing
+                        # and could erase completed students when student 3
+                        # failed.
+                        base_progress = (job.get("progress") or {}).copy()
+                        try:
+                            fresh = api.poll()
+                            fresh_jobs = list(fresh.get("jobs") or [])
+                            if not fresh_jobs and fresh.get("job"):
+                                fresh_jobs = [fresh["job"]]
+                            current = next(
+                                (
+                                    item for item in fresh_jobs
+                                    if item.get("id") == job.get("id")
+                                ),
+                                None,
+                            )
+                            if current:
+                                base_progress = (
+                                    current.get("progress") or base_progress
+                                ).copy()
+                        except Exception:
+                            pass
+
+                        progress = base_progress
                         progress["stage"] = "failed"
                         progress["errors"] = list(
                             progress.get("errors") or []
