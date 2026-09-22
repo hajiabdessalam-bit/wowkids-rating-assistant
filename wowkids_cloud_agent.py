@@ -601,7 +601,7 @@ def wait_for_matching_roster(api, job):
                         ).strip(),
                     )
 
-                    active = WowkidsHomeNavigator(raise_window=True)
+                    active = WowkidsHomeNavigator(raise_window=False)
                     active.navigate_to_roster(job)
 
                     nav = RosterNavigator(raise_window=False)
@@ -730,7 +730,7 @@ def process_job(api, job):
         )
 
         with perf.phase("roster_ready"):
-            nav = RosterNavigator()
+            nav = RosterNavigator(raise_window=False)
             nav.wait_for_roster(timeout=12.0)
             matched, reason = _matches_job(_roster_identity(nav), job)
             if not matched:
@@ -807,7 +807,7 @@ def process_job(api, job):
             perf.finish("skipped_not_opened")
             continue
 
-        rater = HumanLikeRatingSession()
+        rater = HumanLikeRatingSession(raise_window=False)
         with perf.phase("assessment_load"):
             rater.wait_for_assessment_ready(student=matched_name)
 
@@ -842,7 +842,7 @@ def process_job(api, job):
             )
 
         with perf.phase("return_to_roster"):
-            nav_after = RosterNavigator()
+            nav_after = RosterNavigator(raise_window=False)
             nav_after.wait_for_roster(timeout=15.0)
             still_matches, why = _matches_job(
                 _roster_identity(nav_after), job
@@ -957,7 +957,7 @@ def _select_runnable_job(response):
         ]
         if candidates:
             try:
-                home = WowkidsHomeNavigator(raise_window=True)
+                home = WowkidsHomeNavigator(raise_window=False)
                 home.go_home_from_roster()
                 running_waiting = [
                     job for job in candidates
