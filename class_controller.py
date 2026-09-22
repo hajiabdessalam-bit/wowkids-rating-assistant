@@ -236,7 +236,7 @@ class RosterNavigator(HumanLikeRatingSession):
             last = data
             if data[-1]:
                 return data
-            time.sleep(0.35)
+            time.sleep(0.15)
         if last:
             _snap, _visible, state, reasons, _signals, _roster, _verified = last
             raise RuntimeError(
@@ -322,6 +322,39 @@ class RosterNavigator(HumanLikeRatingSession):
         return {"node": node, "status": status, "status_item": item}
 
     def find_student(self, student, max_scrolls=12):
+        """Find a student with a fast current-view check before any scrolling.
+
+        WOWKIDS normally returns to the same/top roster after Submit. The old
+        implementation always sent five scroll-to-top bursts for every student
+        even when the target was already visible. Preserve the proven scrolling
+        fallback, but avoid it when the live current viewport already contains
+        the requested student.
+        """
+        if abort_pressed():
+            raise RuntimeError("STOP pressed (ESC/F10)")
+
+        (
+            snap, visible, state, reasons, signals, roster, verified
+        ) = self._roster_snapshot(
+            "find_{}_current".format(
+                re.sub(r"[^A-Za-z0-9]+", "_", student)[:24]
+            )
+        )
+        if not verified:
+            raise RuntimeError(
+                "not on a visually verified class roster while looking for {!r}".format(
+                    student
+                )
+            )
+
+        match = self._match_student(visible, signals, student)
+        if match:
+            match["snapshot"] = snap
+            match["roster_evidence"] = roster
+            return match
+
+        # Target is not in the current viewport. Normalize to the roster top
+        # and use the existing bounded downward search.
         self._scroll_roster_top()
 
         for attempt in range(max_scrolls + 1):
@@ -437,7 +470,7 @@ class RosterNavigator(HumanLikeRatingSession):
             deadline = time.monotonic() + 3.0
             attempt = 0
             while time.monotonic() < deadline:
-                time.sleep(0.30)
+                time.sleep(0.12)
                 attempt += 1
                 after = self.snapshot(
                     "opened_{}_{}_{}".format(
