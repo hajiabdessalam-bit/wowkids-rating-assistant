@@ -19,7 +19,7 @@ ERROR_ALREADY_EXISTS = 183
 SUPERVISOR_MUTEX = "Local\\WOWKIDSRatingAssistantSupervisorV2"
 STALE_AGENT_SECONDS = 95
 CHECK_EVERY_SECONDS = 8
-UPDATE_EVERY_SECONDS = 300
+UPDATE_EVERY_SECONDS = 900
 
 
 def _stamp():
@@ -75,44 +75,33 @@ def _hidden_flags():
     )
 
 
-def _silent_git_pull():
-    """Best-effort background update with Schannel -> OpenSSL fallback."""
-    commands = [
-        ["git", "pull", "--ff-only"],
-        [
-            "git", "-c", "http.sslBackend=openssl",
-            "-c", "http.version=HTTP/1.1",
-            "pull", "--ff-only",
-        ],
-    ]
-    last_code = None
-    for index, command in enumerate(commands):
-        try:
-            result = subprocess.run(
-                command,
-                cwd=HERE,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=45,
-                creationflags=_hidden_flags(),
-                check=False,
+def _silent_cloud_update():
+    """Best-effort source update through the already-working Vercel backend."""
+    updater = os.path.join(HERE, "vercel_update.py")
+    if not os.path.exists(updater):
+        _log("cloud updater is not installed yet")
+        return False
+    try:
+        result = subprocess.run(
+            [sys.executable, updater, "--background", "--quiet"],
+            cwd=HERE,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=75,
+            creationflags=_hidden_flags(),
+            check=False,
+        )
+        if result.returncode == 0:
+            _log("Feedback Assistant cloud update check succeeded")
+            return True
+        _log(
+            "Feedback Assistant cloud update failed; exit code {}".format(
+                result.returncode
             )
-            last_code = result.returncode
-            if result.returncode == 0:
-                _log(
-                    "git pull succeeded{}".format(
-                        " with OpenSSL fallback" if index else ""
-                    )
-                )
-                return True
-        except Exception as exc:
-            _log(
-                "git pull attempt {} failed: {}".format(
-                    index + 1, exc
-                )
-            )
-    _log("git pull failed; last exit code {}".format(last_code))
+        )
+    except Exception as exc:
+        _log("Feedback Assistant cloud update failed: {}".format(exc))
     return False
 
 
@@ -162,7 +151,7 @@ def main():
 
     _log("supervisor started")
     try:
-        _silent_git_pull()
+        _silent_cloud_update()
         last_update_check = time.monotonic()
 
         while True:
@@ -179,7 +168,7 @@ def main():
                         time.monotonic() - last_update_check
                         >= UPDATE_EVERY_SECONDS
                     ):
-                        _silent_git_pull()
+                        _silent_cloud_update()
                         last_update_check = time.monotonic()
 
                     age = _status_age_seconds()
