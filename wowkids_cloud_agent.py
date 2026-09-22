@@ -26,6 +26,7 @@ from class_controller import (
 )
 from humanlike_engine import HumanLikeRatingSession, abort_pressed
 from home_navigator import WowkidsHomeNavigator
+from performance_log import StudentPerformance
 
 
 STATE_DIR = os.path.join(
@@ -56,7 +57,7 @@ def _source_version():
     digest = hashlib.sha256()
     for name in ('wowkids_cloud_agent.py', 'home_navigator.py', 'class_controller.py',
                  'humanlike_engine.py', 'rating_engine.py', 'validate_context.py',
-                 'visual_score_rows.py', 'wkcommon.py'):
+                 'visual_score_rows.py', 'wkcommon.py', 'performance_log.py'):
         with open(os.path.join(HERE, name), 'rb') as source:
             digest.update(source.read())
     return digest.hexdigest()[:16]
@@ -691,6 +692,14 @@ def process_job(api, job):
         if student_id in completed_ids:
             continue
 
+        perf = StudentPerformance(
+            job_id=job_id,
+            student=display_name,
+            class_name=job.get("class_name") or "",
+            class_time=job.get("class_time") or "",
+            target_date=job.get("target_date") or "",
+        )
+
         progress = _job_progress(
             "rating",
             completed,
@@ -709,14 +718,16 @@ def process_job(api, job):
             ),
         )
 
-        nav = RosterNavigator()
-        nav.wait_for_roster(timeout=12.0)
-        matched, reason = _matches_job(_roster_identity(nav), job)
-        if not matched:
-            # Do not rate a student if the user navigated away to another class.
-            nav, _identity = wait_for_matching_roster(api, job)
+        with perf.phase("roster_ready"):
+            nav = RosterNavigator()
+            nav.wait_for_roster(timeout=12.0)
+            matched, reason = _matches_job(_roster_identity(nav), job)
+            if not matched:
+                # Do not rate a student if the user navigated away to another class.
+                nav, _identity = wait_for_matching_roster(api, job)
 
-        matched_name, match = _find_job_student(nav, item)
+        with perf.phase("student_lookup"):
+            matched_name, match = _find_job_student(nav, item)
         if not match:
             skipped_item = {
                 "studentId": student_id,
@@ -724,6 +735,7 @@ def process_job(api, job):
                 "reason": "not found on the matched WOWKIDS roster",
             }
             skipped.append(skipped_item)
+            perf.finish("skipped_not_found")
             _send_progress(
                 api,
                 job_id,
@@ -748,6 +760,7 @@ def process_job(api, job):
                     "reason": "already Posted",
                 }
             )
+            perf.finish("skipped_posted")
             continue
         if status == STATUS_RATED:
             skipped.append(
@@ -757,6 +770,7 @@ def process_job(api, job):
                     "reason": "already Rated",
                 }
             )
+            perf.finish("skipped_rated")
             continue
         if status != STATUS_NOT_RATING:
             skipped.append(
@@ -766,9 +780,11 @@ def process_job(api, job):
                     "reason": "roster status was not safely verified",
                 }
             )
+            perf.finish("skipped_unknown_status")
             continue
 
-        opened = nav.open_student(matched_name, match)
+        with perf.phase("open_student"):
+            opened = nav.open_student(matched_name, match)
         if not opened.get("opened"):
             skipped.append(
                 {
@@ -777,20 +793,27 @@ def process_job(api, job):
                     "reason": opened.get("reason") or "student did not open",
                 }
             )
+            perf.finish("skipped_not_opened")
             continue
 
         rater = HumanLikeRatingSession()
-        rater.wait_for_assessment_ready(student=matched_name)
+        with perf.phase("assessment_load"):
+            rater.wait_for_assessment_ready(student=matched_name)
+
         if class_categories is None:
-            class_categories = list(rater.discover_categories())
+            with perf.phase("category_discovery"):
+                class_categories = list(rater.discover_categories())
+        perf.note("categoryCount", len(class_categories or []))
 
         scores = _scores_for_categories(item, class_categories)
-        results, _final = rater.fill_discovered(
-            class_categories, scores
-        )
-        submit = rater.submit_verified_student(
-            class_categories, results
-        )
+        with perf.phase("rating_actions"):
+            results, _final = rater.fill_discovered(
+                class_categories, scores
+            )
+        with perf.phase("submit"):
+            submit = rater.submit_verified_student(
+                class_categories, results
+            )
         if not submit.get("accepted"):
             raise RuntimeError(
                 "{}: Submit was clicked but success was not verified".format(
@@ -798,11 +821,12 @@ def process_job(api, job):
                 )
             )
 
-        nav_after = RosterNavigator()
-        nav_after.wait_for_roster(timeout=15.0)
-        still_matches, why = _matches_job(
-            _roster_identity(nav_after), job
-        )
+        with perf.phase("return_to_roster"):
+            nav_after = RosterNavigator()
+            nav_after.wait_for_roster(timeout=15.0)
+            still_matches, why = _matches_job(
+                _roster_identity(nav_after), job
+            )
         if not still_matches:
             raise RuntimeError(
                 "{}: returned to a roster but class identity no longer matched ({})".format(
@@ -810,6 +834,7 @@ def process_job(api, job):
                 )
             )
 
+        perf_summary = perf.finish("completed")
         completed_item = {
             "studentId": student_id,
             "name": display_name,
@@ -817,6 +842,7 @@ def process_job(api, job):
             "scores": scores,
             "submitVerification": submit.get("verification"),
             "completedAt": _now(),
+            "performance": perf_summary,
         }
         completed.append(completed_item)
         completed_ids.add(student_id)
