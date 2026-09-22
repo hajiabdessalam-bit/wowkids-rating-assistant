@@ -357,6 +357,28 @@ def node_is_visibly_present(node, client_rect):
     return True, ""
 
 
+def prepare_background_window(wrapper) -> str:
+    """Make WOWKIDS capturable without stealing keyboard focus.
+
+    Normal batch operation should leave the coach free to use other apps.
+    If WOWKIDS was minimised, show it without activation. We deliberately do
+    NOT call SetForegroundWindow here.
+    """
+    try:
+        handle = wrapper.handle
+    except Exception as exc:
+        return "no window handle ({})".format(exc)
+    try:
+        if ctypes.windll.user32.IsIconic(handle):
+            # SW_SHOWNOACTIVATE: restore/show without activating the window.
+            ctypes.windll.user32.ShowWindow(handle, 4)
+            time.sleep(0.35)
+            return "shown without activation"
+    except Exception as exc:
+        return "background restore failed: {}".format(exc)
+    return "already available"
+
+
 def restore_window(wrapper) -> str:
     """Undo a minimised window so the Chromium view is laid out again.
 
