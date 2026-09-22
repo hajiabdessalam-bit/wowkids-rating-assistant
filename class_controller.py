@@ -228,7 +228,7 @@ class RosterNavigator(HumanLikeRatingSession):
         attempt = 0
         while time.monotonic() < deadline:
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
             attempt += 1
             data = self._roster_snapshot(
                 "wait_roster_{:02d}".format(attempt)
@@ -331,7 +331,7 @@ class RosterNavigator(HumanLikeRatingSession):
         the requested student.
         """
         if abort_pressed():
-            raise RuntimeError("STOP pressed (ESC/F10)")
+            raise RuntimeError("STOP pressed (F10)")
 
         (
             snap, visible, state, reasons, signals, roster, verified
@@ -359,7 +359,7 @@ class RosterNavigator(HumanLikeRatingSession):
 
         for attempt in range(max_scrolls + 1):
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
 
             (
                 snap, visible, state, reasons, signals, roster, verified
@@ -464,7 +464,7 @@ class RosterNavigator(HumanLikeRatingSession):
 
         for index, point in enumerate(points):
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
 
             self.click_at(point)
             deadline = time.monotonic() + 3.0
@@ -577,7 +577,7 @@ def main():
 
         for position, row in enumerate(selected, 1):
             if abort_pressed():
-                raise RuntimeError("STOP pressed (ESC/F10)")
+                raise RuntimeError("STOP pressed (F10)")
 
             student = row["Student"]
             print("[{}/{}] {}...".format(position, len(selected), student))
