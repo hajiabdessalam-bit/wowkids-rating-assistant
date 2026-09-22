@@ -699,6 +699,7 @@ def process_job(api, job):
             class_time=job.get("class_time") or "",
             target_date=job.get("target_date") or "",
         )
+        perf.note("codeVersion", LOADED_VERSION)
 
         progress = _job_progress(
             "rating",
