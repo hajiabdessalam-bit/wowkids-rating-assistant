@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import io
 import json
 import os
 import shutil
-import sys
 import tempfile
 import time
 import urllib.error
-import urllib.request
 import urllib.parse
-import zipfile
+import urllib.request
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -21,23 +17,10 @@ STATE_DIR = os.path.join(
     "WOWKIDSRatingAssistant",
 )
 CONFIG_PATH = os.path.join(STATE_DIR, "device_config.json")
+STATUS_PATH = os.path.join(STATE_DIR, "cloud_update_status.json")
 BACKUP_ROOT = os.path.join(HERE, "_cloud_update_backups")
 DEFAULT_BASE_URL = "https://feedback-assistant-alpha.vercel.app"
-MAX_ARCHIVE_BYTES = 4_200_000
 
-SKIP_ALWAYS = {
-    "REPAIR_WINDOWS_AGENT.bat",
-}
-SKIP_PREFIXES = (
-    ".git/",
-    "reports/",
-    "logs/",
-    "libs/",
-    "__pycache__/",
-    ".venv/",
-    "venv/",
-    "_cloud_update_backups/",
-)
 BACKGROUND_SKIP = {
     "wowkids_agent_supervisor.py",
     "repair_windows_agent.py",
@@ -60,27 +43,19 @@ def _read_config():
     return token, base_url
 
 
-def _download_archive(token, base_url, ref="main"):
-    query = urllib.parse.urlencode({"ref": ref})
-    url = base_url + "/api/wowkids-update?" + query
+def _request(url, token, accept, timeout=30):
     req = urllib.request.Request(
         url,
         headers={
-            "Accept": "application/zip",
+            "Accept": accept,
             "x-wowkids-device-token": token,
-            "User-Agent": "WOWKIDS-Rating-Assistant-Updater/2.0",
+            "User-Agent": "WOWKIDS-Rating-Assistant-Updater/3.0",
         },
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            data = response.read(MAX_ARCHIVE_BYTES + 1)
-            if len(data) > MAX_ARCHIVE_BYTES:
-                raise RuntimeError("cloud update archive is unexpectedly large")
-            if len(data) < 1000 or not data.startswith(b"PK"):
-                raise RuntimeError("cloud update did not return a valid ZIP archive")
-            source = response.headers.get("X-WOWKIDS-Update-Channel") or "main"
-            return data, source
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read(500).decode("utf-8", "replace")
         raise RuntimeError(
@@ -96,52 +71,43 @@ def _download_archive(token, base_url, ref="main"):
         )
 
 
-def _archive_files(data):
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        names = [
-            name for name in archive.namelist()
-            if name and not name.endswith("/")
-        ]
-        roots = {name.split("/", 1)[0] for name in names if "/" in name}
-        if len(roots) != 1:
-            raise RuntimeError("update archive has an unexpected layout")
-        root = next(iter(roots)) + "/"
-
-        files = {}
-        for name in names:
-            if not name.startswith(root):
-                continue
-            rel = name[len(root):].replace("\\", "/")
-            if not rel or rel.startswith("../") or "/../" in rel:
-                continue
-            files[rel] = archive.read(name)
-
-    required = {
-        "wowkids_cloud_agent.py",
-        "humanlike_engine.py",
-        "rating_engine.py",
-        "class_controller.py",
-        "wkcommon.py",
-    }
-    missing = sorted(required - set(files))
-    if missing:
-        raise RuntimeError(
-            "update archive is missing required files: {}".format(
-                ", ".join(missing)
-            )
-        )
-    return files
+def _manifest(token, base_url, ref):
+    query = urllib.parse.urlencode({"ref": ref})
+    raw = _request(
+        base_url + "/api/wowkids-update-manifest?" + query,
+        token,
+        "application/json",
+        timeout=30,
+    )
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError("invalid cloud update manifest: {}".format(exc))
+    if not data.get("ok") or not data.get("sha"):
+        raise RuntimeError("cloud update manifest is incomplete")
+    return data
 
 
-def _should_skip(rel, background=False, ref="main"):
-    rel = rel.replace("\\", "/")
-    if rel in SKIP_ALWAYS:
-        return True
-    if any(rel.startswith(prefix) for prefix in SKIP_PREFIXES):
-        return True
-    if (background or ref != "main") and rel in BACKGROUND_SKIP:
-        return True
-    return False
+def _file_bytes(token, base_url, ref, path):
+    query = urllib.parse.urlencode({"ref": ref, "path": path})
+    data = _request(
+        base_url + "/api/wowkids-update-file?" + query,
+        token,
+        "application/octet-stream",
+        timeout=30,
+    )
+    if len(data) > 220_000:
+        raise RuntimeError("cloud update file is unexpectedly large: {}".format(path))
+    return data
+
+
+def _load_status():
+    try:
+        with open(STATUS_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def _same_bytes(path, payload):
@@ -150,6 +116,14 @@ def _same_bytes(path, payload):
             return fh.read() == payload
     except Exception:
         return False
+
+
+def _skip_path(path, background, ref):
+    if background and path in BACKGROUND_SKIP:
+        return True
+    if ref != "main" and path in BACKGROUND_SKIP:
+        return True
+    return False
 
 
 def _prune_backups(keep=4):
@@ -166,101 +140,89 @@ def _prune_backups(keep=4):
         pass
 
 
-def _apply(files, background=False, ref="main"):
-    changed = []
-    for rel, payload in files.items():
-        if _should_skip(rel, background=background, ref=ref):
-            continue
-        target = os.path.join(HERE, *rel.split("/"))
-        if _same_bytes(target, payload):
-            continue
-        changed.append((rel, target, payload))
+def _install_file(path, payload, backup_root):
+    target = os.path.join(HERE, *path.split("/"))
+    if _same_bytes(target, payload):
+        return False
 
-    if not changed:
-        return []
+    if os.path.isfile(target):
+        backup_path = os.path.join(backup_root, *path.split("/"))
+        os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+        shutil.copy2(target, backup_path)
 
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    backup = os.path.join(BACKUP_ROOT, stamp)
-    os.makedirs(backup, exist_ok=True)
-
-    for rel, target, _payload in changed:
-        if os.path.isfile(target):
-            backup_path = os.path.join(backup, *rel.split("/"))
-            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-            shutil.copy2(target, backup_path)
-
-    for rel, target, payload in changed:
-        os.makedirs(os.path.dirname(target) or HERE, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            prefix=".wowkids_update_",
-            dir=os.path.dirname(target) or HERE,
-        )
+    os.makedirs(os.path.dirname(target) or HERE, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".wowkids_update_",
+        dir=os.path.dirname(target) or HERE,
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+        os.replace(tmp, target)
+    finally:
         try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(payload)
-            os.replace(tmp, target)
-        finally:
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except Exception:
-                pass
-
-    with open(
-        os.path.join(backup, "_changed_files.json"),
-        "w",
-        encoding="utf-8",
-    ) as fh:
-        json.dump(
-            {
-                "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "files": [rel for rel, _target, _payload in changed],
-            },
-            fh,
-            indent=2,
-        )
-
-    _prune_backups()
-    return [rel for rel, _target, _payload in changed]
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+    return True
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--background",
-        action="store_true",
-        help="Update only agent runtime files safe to replace under the supervisor.",
-    )
+    parser.add_argument("--background", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
         "--ref",
         default="main",
         choices=("main", "stable-current", "stable-working-2026-09-22"),
-        help="Cloud update channel / rollback branch.",
     )
     args = parser.parse_args(argv)
 
     token, base_url = _read_config()
-    data, source = _download_archive(token, base_url, ref=args.ref)
-    archive_hash = hashlib.sha256(data).hexdigest()[:12]
-    files = _archive_files(data)
-    changed = _apply(files, background=args.background, ref=args.ref)
+    manifest = _manifest(token, base_url, args.ref)
+    version = str(manifest.get("sha") or "")
+    files = list(manifest.get("files") or [])
 
-    state = {
+    previous = _load_status()
+    if (
+        args.ref == "main"
+        and previous.get("requestedRef") == args.ref
+        and previous.get("sourceVersion") == version
+    ):
+        if not args.quiet:
+            print("Already up to date.")
+        return 0
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    backup = os.path.join(BACKUP_ROOT, stamp)
+    os.makedirs(backup, exist_ok=True)
+
+    changed = []
+    for item in files:
+        path = str(item.get("path") or "")
+        if not path or _skip_path(path, args.background, args.ref):
+            continue
+        payload = _file_bytes(token, base_url, args.ref, path)
+        if _install_file(path, payload, backup):
+            changed.append(path)
+
+    if not changed:
+        shutil.rmtree(backup, ignore_errors=True)
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    status = {
         "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "source": source,
-        "archiveHash": archive_hash,
+        "source": "feedback-assistant",
+        "sourceVersion": version,
+        "requestedRef": args.ref,
         "changedFiles": changed,
         "background": bool(args.background),
-        "requestedRef": args.ref,
     }
-    os.makedirs(STATE_DIR, exist_ok=True)
-    with open(
-        os.path.join(STATE_DIR, "cloud_update_status.json"),
-        "w",
-        encoding="utf-8",
-    ) as fh:
-        json.dump(state, fh, indent=2)
+    with open(STATUS_PATH, "w", encoding="utf-8") as fh:
+        json.dump(status, fh, indent=2)
+
+    _prune_backups()
 
     if not args.quiet:
         if changed:
