@@ -19,7 +19,7 @@ ERROR_ALREADY_EXISTS = 183
 SUPERVISOR_MUTEX = "Local\\WOWKIDSRatingAssistantSupervisorV2"
 STALE_AGENT_SECONDS = 95
 CHECK_EVERY_SECONDS = 8
-UPDATE_EVERY_SECONDS = 900
+UPDATE_EVERY_SECONDS = 0
 
 
 def _stamp():
@@ -76,33 +76,8 @@ def _hidden_flags():
 
 
 def _silent_cloud_update():
-    """Best-effort source update through the already-working Vercel backend."""
-    updater = os.path.join(HERE, "vercel_update.py")
-    if not os.path.exists(updater):
-        _log("cloud updater is not installed yet")
-        return False
-    try:
-        result = subprocess.run(
-            [sys.executable, updater, "--background", "--quiet"],
-            cwd=HERE,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=75,
-            creationflags=_hidden_flags(),
-            check=False,
-        )
-        if result.returncode == 0:
-            _log("Feedback Assistant cloud update check succeeded")
-            return True
-        _log(
-            "Feedback Assistant cloud update failed; exit code {}".format(
-                result.returncode
-            )
-        )
-    except Exception as exc:
-        _log("Feedback Assistant cloud update failed: {}".format(exc))
-    return False
+    """Updates are delivered by wowkids_cloud_agent.py via its normal poll."""
+    return True
 
 
 def _run_agent():
