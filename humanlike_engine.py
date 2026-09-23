@@ -1018,14 +1018,23 @@ class HumanLikeRatingSession(_BaseSession):
             item for item in items
             if item.get("kind") in ("posted", "purple-badge", "grey-badge")
         ]
+        review_actions = [
+            item for item in items
+            if item.get("kind") == "review-action"
+        ]
+        new_labels = int((signals or {}).get("new_roster_label_count") or 0)
+        legacy_verified = bool(has_post_all and len(badges) >= 1)
+        redesigned_verified = bool(review_actions and new_labels >= 3)
         return {
             "has_post_all": has_post_all,
             "badge_count": len(badges),
+            "review_action_count": len(review_actions),
+            "new_roster_label_count": new_labels,
             "items": items,
-            # After Submit, one live status badge plus the visually verified
-            # Post All control is enough to prove we are back on the roster.
-            # We OBSERVE Post All here; we never click it.
-            "verified": bool(has_post_all and len(badges) >= 1),
+            # 2026-09-23 redesigned class pages no longer expose the old
+            # Post All/status-badge structure. A live purple Reviews action
+            # plus the roster column labels is the equivalent safe proof.
+            "verified": bool(legacy_verified or redesigned_verified),
         }
 
     def submit_verified_student(self, categories, results, timeout=10.0):
