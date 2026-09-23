@@ -76,8 +76,7 @@ def _hidden_flags():
 
 
 def _silent_cloud_update():
-    # Updates are delivered by the cloud agent through its normal polling
-    # channel. The supervisor only restarts the agent when it exits.
+    """Updates are delivered by wowkids_cloud_agent through its normal poll."""
     return True
 
 
@@ -127,7 +126,6 @@ def main():
 
     _log("supervisor started")
     try:
-        _silent_cloud_update()
         last_update_check = time.monotonic()
 
         while True:
@@ -144,7 +142,6 @@ def main():
                         time.monotonic() - last_update_check
                         >= UPDATE_EVERY_SECONDS
                     ):
-                        _silent_cloud_update()
                         last_update_check = time.monotonic()
 
                     age = _status_age_seconds()
