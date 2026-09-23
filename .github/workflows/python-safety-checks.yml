@@ -2,7 +2,7 @@ name: Python safety checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/background-resume-audit]
   pull_request:
 
 jobs:
