@@ -261,8 +261,8 @@ class RosterNavigator(HumanLikeRatingSession):
         raise RuntimeError("class roster was not visually verified")
 
     def _scroll_roster_top(self):
-        for _ in range(5):
-            self._scroll(10, settle=0.10)
+        for _ in range(4):
+            self._scroll(14, settle=0.06)
 
     @staticmethod
     def _status_name(item):
@@ -410,7 +410,7 @@ class RosterNavigator(HumanLikeRatingSession):
         _distance, node, status, item = matches[0]
         return {"node": node, "status": status, "status_item": item}
 
-    def find_student(self, student, max_scrolls=12):
+    def find_student(self, student, max_scrolls=10, prefetched=None):
         """Find a student with a fast current-view check before any scrolling.
 
         WOWKIDS normally returns to the same/top roster after Submit. The old
@@ -422,13 +422,18 @@ class RosterNavigator(HumanLikeRatingSession):
         if abort_pressed():
             raise RuntimeError("STOP pressed (F10)")
 
-        (
-            snap, visible, state, reasons, signals, roster, verified
-        ) = self._roster_snapshot(
-            "find_{}_current".format(
-                re.sub(r"[^A-Za-z0-9]+", "_", student)[:24]
+        if prefetched is not None:
+            (
+                snap, visible, state, reasons, signals, roster, verified
+            ) = prefetched
+        else:
+            (
+                snap, visible, state, reasons, signals, roster, verified
+            ) = self._roster_snapshot(
+                "find_{}_current".format(
+                    re.sub(r"[^A-Za-z0-9]+", "_", student)[:24]
+                )
             )
-        )
         if not verified:
             # The roster header scrolls out of view. Re-establish its class
             # identity at the top before trusting any student row.
@@ -481,7 +486,7 @@ class RosterNavigator(HumanLikeRatingSession):
                 return match
 
             if attempt < max_scrolls:
-                self._scroll(-3, settle=0.22)
+                self._scroll(-4, settle=0.12)
 
         return None
 
@@ -572,7 +577,7 @@ class RosterNavigator(HumanLikeRatingSession):
             deadline = time.monotonic() + 5.0
             attempt = 0
             while time.monotonic() < deadline:
-                time.sleep(0.12)
+                time.sleep(0.08)
                 attempt += 1
                 after = self.snapshot(
                     "opened_reviews_{}_{}".format(
@@ -628,7 +633,7 @@ class RosterNavigator(HumanLikeRatingSession):
             deadline = time.monotonic() + 3.0
             attempt = 0
             while time.monotonic() < deadline:
-                time.sleep(0.12)
+                time.sleep(0.08)
                 attempt += 1
                 after = self.snapshot(
                     "opened_{}_{}_{}".format(
