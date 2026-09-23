@@ -580,10 +580,14 @@ class HumanLikeRatingSession(_BaseSession):
 
                 if top > safe_bottom:
                     direction = -1
-                    self._scroll(-1, settle=0.11)
+                    distance = top - safe_bottom
+                    steps = 2 if distance > 110 else 1
+                    self._scroll(-steps, settle=0.11)
                 else:
                     direction = 1
-                    self._scroll(1, settle=0.11)
+                    distance = safe_top - top
+                    steps = 2 if distance > 110 else 1
+                    self._scroll(steps, settle=0.11)
                 continue
 
             visible_indices = [
