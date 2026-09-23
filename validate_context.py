@@ -45,6 +45,15 @@ ROSTER_MARKERS = (
     "view comments",
     "total：",
     "total:",
+    # 2026-09-23 WOWKIDS redesign. The new class page is already the
+    # roster: pending students expose a solid purple "Reviews" action and the
+    # page carries Students / Sign-in / Photos / Reviews column labels.
+    "reviews",
+    "group photo",
+    "parent report",
+    "students",
+    "sign-in",
+    "photos",
 )
 
 STUDENT_MARKERS = ("暂无数据", "no data", "学员")
@@ -265,6 +274,11 @@ def _roster_visual_support(visible, screenshot_path, window_rect):
         elif "not rateing" in name:
             supported = colours["grey"] >= 0.40
             kind = "grey-badge"
+        elif name == "reviews":
+            # New roster pending-rating action. The button is a solid purple
+            # pill, unlike the "Reviews 7/11" counters on the Home class cards.
+            supported = colours["purple"] >= 0.20
+            kind = "review-action"
         if supported:
             result.append({
                 "marker": marker,
@@ -313,7 +327,28 @@ def classify_live_page(visible, heading_doc_ids=None, screenshot_path=None,
     badge_count = sum(
         1 for item in roster_visual
         if item["kind"] in ("posted", "purple-badge", "grey-badge"))
-    strong_roster = has_post_all and badge_count >= 2
+    review_actions = [
+        item for item in roster_visual
+        if item["kind"] == "review-action"
+    ]
+    visible_names = {
+        (node.get("name") or "").strip().casefold()
+        for node in visible
+        if (node.get("name") or "").strip()
+    }
+    new_roster_labels = {
+        "students", "sign-in", "photos", "reviews"
+    }
+    new_roster_label_count = len(new_roster_labels & visible_names)
+
+    strong_roster = (
+        (has_post_all and badge_count >= 2)
+        or (
+            len(review_actions) >= 1
+            and "students" in visible_names
+            and new_roster_label_count >= 3
+        )
+    )
 
     base_signals = {
         "roster_markers": sorted({m for m, _ in _marker_hits(visible, ROSTER_MARKERS)}),
@@ -322,6 +357,7 @@ def classify_live_page(visible, heading_doc_ids=None, screenshot_path=None,
         "rating_visual_support": support,
         "rating_visual_supported": visually_supported,
         "roster_visual_support": roster_visual,
+        "new_roster_label_count": new_roster_label_count,
         "student_markers": sorted({m for m, _ in _marker_hits(visible, STUDENT_MARKERS)}),
         "home_markers": sorted({m for m, _ in _marker_hits(visible, HOME_MARKERS)}),
     }
@@ -335,10 +371,17 @@ def classify_live_page(visible, heading_doc_ids=None, screenshot_path=None,
         )
 
     if strong_roster:
+        if has_post_all:
+            reason = "class roster visually verified (Post All + {} live status badges)".format(
+                badge_count
+            )
+        else:
+            reason = "new class roster visually verified ({} live Reviews action(s) + {} roster labels)".format(
+                len(review_actions), new_roster_label_count
+            )
         return (
             "CLASS_ROSTER",
-            ["class roster visually verified (Post All + {} live status badges)".format(
-                badge_count)],
+            [reason],
             base_signals,
         )
 
