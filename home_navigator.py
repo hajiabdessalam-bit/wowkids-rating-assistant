@@ -475,7 +475,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         month_short = calendar.month_abbr[target_date.month]
         month_long = calendar.month_name[target_date.month]
         pattern = re.compile(
-            r"\\b(?:{}|{})\\s+{}\\b".format(
+            r"\b(?:{}|{})\s+{}\b".format(
                 re.escape(month_short),
                 re.escape(month_long),
                 target_date.day,
