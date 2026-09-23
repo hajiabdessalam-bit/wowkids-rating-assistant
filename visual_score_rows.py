@@ -181,7 +181,9 @@ def detect_visual_score_rows(screenshot_path, window_rect, heading_rect,
             c for c in radio_components
             if 12 <= c["width"] <= 24
             and 12 <= c["height"] <= 24
-            and 25 <= c["area"] <= 160
+            # The redesigned WOWKIDS radio outline renders as a 24x24 ring
+            # with roughly 190 non-white pixels at this display scale.
+            and 25 <= c["area"] <= 220
             and 0.65 <= c["width"] / float(c["height"]) <= 1.45
         ]
         if len(radios) != 1:
