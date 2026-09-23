@@ -287,6 +287,7 @@ class HumanLikeRatingSession(_BaseSession):
         super().__init__(*args, **kwargs)
         self._assessment_ready_confirmed = False
         self._assessment_ready_student = None
+        self._assessment_ready_snapshot = None
 
     def park_mouse(self):
         """Do not move the user's physical cursor just to take screenshots.
@@ -444,10 +445,11 @@ class HumanLikeRatingSession(_BaseSession):
         return items
 
     def _scroll_to_top(self):
-        # Use a few large background wheel messages rather than dozens of
-        # physical mouse-wheel actions.
-        for _ in range(6):
-            self._scroll(12, settle=0.12)
+        # Four larger wheel bursts reach the same top boundary faster than the
+        # old six-step sequence. The mini app clamps at the top, so overshoot
+        # is harmless and saves roughly half a second on every student.
+        for _ in range(4):
+            self._scroll(18, settle=0.07)
 
     def save_diagnostic(self, snap, reason):
         path = os.path.splitext(snap['path'])[0] + '.json'
@@ -471,7 +473,10 @@ class HumanLikeRatingSession(_BaseSession):
         wanted = str(student or "").strip().casefold()
         cached = str(self._assessment_ready_student or "").strip().casefold()
         if self._assessment_ready_confirmed and (not wanted or wanted == cached):
-            return self.snapshot("assessment_ready_cached")
+            # Every caller only needs the proof that this session is ready.
+            # Rewalking thousands of stale Chromium UIA nodes here used to add
+            # several seconds per student for no new information.
+            return self._assessment_ready_snapshot
 
         self._scroll_to_top()
         deadline = time.monotonic() + timeout
@@ -485,6 +490,7 @@ class HumanLikeRatingSession(_BaseSession):
             if ready:
                 self._assessment_ready_confirmed = True
                 self._assessment_ready_student = student
+                self._assessment_ready_snapshot = snap
                 return snap
             if attempt == 0 or time.monotonic() >= deadline:
                 self.save_diagnostic(snap, reason)
@@ -530,7 +536,7 @@ class HumanLikeRatingSession(_BaseSession):
         self._scroll_to_top()
         return found
 
-    def _position_category(self, category, max_steps=24):
+    def _position_category(self, category, max_steps=24, initial_snap=None):
         """Find a category without ever blindly scrolling past it.
 
         The first version always scrolled down when the target heading was not
@@ -558,7 +564,10 @@ class HumanLikeRatingSession(_BaseSession):
             if abort_pressed():
                 raise RuntimeError("STOP pressed (F10)")
 
-            snap = self.snapshot("{}_position_{:02d}".format(category, attempt))
+            if attempt == 0 and initial_snap is not None:
+                snap = initial_snap
+            else:
+                snap = self.snapshot("{}_position_{:02d}".format(category, attempt))
             visible_pairs = self._supported_categories(snap)
             visible = dict(visible_pairs)
             node = visible.get(category)
@@ -571,10 +580,10 @@ class HumanLikeRatingSession(_BaseSession):
 
                 if top > safe_bottom:
                     direction = -1
-                    self._scroll(-1, settle=0.20)
+                    self._scroll(-1, settle=0.11)
                 else:
                     direction = 1
-                    self._scroll(1, settle=0.20)
+                    self._scroll(1, settle=0.11)
                 continue
 
             visible_indices = [
@@ -594,7 +603,7 @@ class HumanLikeRatingSession(_BaseSession):
                 # We reached the bottom without seeing the target. Reverse.
                 direction = 1
 
-            self._scroll(direction * 2, settle=0.22)
+            self._scroll(direction * 2, settle=0.12)
 
         raise RuntimeError(
             "{} was not found after {} small controlled scrolls; stopped safely".format(
@@ -696,8 +705,10 @@ class HumanLikeRatingSession(_BaseSession):
 
         return (int(x), int(y))
 
-    def ensure_expanded_humanlike(self, category):
-        snap = self._position_category(category)
+    def ensure_expanded_humanlike(self, category, positioned_snap=None):
+        snap = self._position_category(
+            category, initial_snap=positioned_snap
+        )
         rows, _reason, _section = self._rows_for_live(snap, category)
         if rows and rows.get("layout") == "vertical-visual":
             return snap, rows, {"changed": False, "point": None, "waitSeconds": 0.0}
@@ -811,14 +822,16 @@ class HumanLikeRatingSession(_BaseSession):
         return best[1] if 1 <= best[1] <= 5 else None
 
 
-    def select_score_humanlike(self, category, score):
+    def select_score_humanlike(self, category, score, positioned_snap=None):
         score = int(score)
         if category not in CATEGORY_ORDER:
             raise ValueError("unknown category {}".format(category))
         if not 1 <= score <= 5:
             raise ValueError("{} score must be in 1..5".format(category))
 
-        _expanded, rows, expand_info = self.ensure_expanded_humanlike(category)
+        expanded_snap, rows, expand_info = self.ensure_expanded_humanlike(
+            category, positioned_snap=positioned_snap
+        )
         if len(rows.get("rows", [])) != 5:
             raise RuntimeError(
                 "{} does not have five verified score rows".format(category)
@@ -839,9 +852,10 @@ class HumanLikeRatingSession(_BaseSession):
                 "{} score target is outside safe area".format(category)
             )
 
-        baseline = self.capture_only(
-            "{}_score{}_baseline".format(category, score)
-        )
+        # ensure_expanded_humanlike already produced a fresh rendered capture.
+        # Reuse it as the score baseline instead of immediately capturing the
+        # identical frame again.
+        baseline = expanded_snap
         already_selected = self._selected_score_from_rows(
             baseline["path"], rows
         )
@@ -921,7 +935,6 @@ class HumanLikeRatingSession(_BaseSession):
         the confirmed category list exactly as before.
         """
         self.wait_for_assessment_ready()
-        self._scroll_to_top()
 
         categories = []
         results = []
@@ -948,7 +961,7 @@ class HumanLikeRatingSession(_BaseSession):
                         )
                     )
                 result = self.select_score_humanlike(
-                    category, scores[category]
+                    category, scores[category], positioned_snap=snap
                 )
                 categories.append(category)
                 results.append(result)
@@ -968,7 +981,7 @@ class HumanLikeRatingSession(_BaseSession):
             # Small step because an expanded accordion changes the page height.
             # This avoids skipping a category while still eliminating the old
             # full dry-run + rewind.
-            self._scroll(-2, settle=0.16)
+            self._scroll(-3, settle=0.10)
 
         raise RuntimeError(
             "could not discover and rate the first student's abilities safely "
@@ -982,19 +995,26 @@ class HumanLikeRatingSession(_BaseSession):
 
         self.wait_for_assessment_ready()
         results = []
+        positioned_snap = self._assessment_ready_snapshot
         for category in categories:
             if abort_pressed():
                 raise RuntimeError("STOP pressed (F10)")
             results.append(
-                self.select_score_humanlike(category, scores[category])
+                self.select_score_humanlike(
+                    category,
+                    scores[category],
+                    positioned_snap=positioned_snap,
+                )
             )
+            positioned_snap = None
 
-        # Move to the bottom so the user can visually inspect the final form.
-        for _ in range(18):
-            snap = self.snapshot("finish_seek_submit")
+        # Submit discovery is pixels-only. Avoid a full Chromium accessibility
+        # walk on every downward step.
+        for _ in range(12):
+            snap = self.capture_only("finish_seek_submit")
             if _orange_submit_button(snap["path"], self.window_rect):
                 return results, snap
-            self._scroll(-5, settle=0.22)
+            self._scroll(-7, settle=0.11)
 
         raise RuntimeError("ratings were selected but Submit area was not found")
 
@@ -1059,12 +1079,12 @@ class HumanLikeRatingSession(_BaseSession):
         for _ in range(8):
             if abort_pressed():
                 raise RuntimeError("STOP pressed (F10)")
-            snap = self.snapshot("submit_live_check")
+            snap = self.capture_only("submit_live_check")
             rect = _orange_submit_button(snap["path"], self.window_rect)
             if rect and rect["width"] >= int(self.client_rect["width"] * 0.70):
                 submit_rect, submit_snap = rect, snap
                 break
-            self._scroll(-2, settle=0.18)
+            self._scroll(-3, settle=0.10)
 
         if not submit_rect:
             raise RuntimeError(
