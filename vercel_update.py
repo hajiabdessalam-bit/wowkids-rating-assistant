@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-"""Compatibility shim for older installers.
+"""Compatibility shim.
 
-Windows source updates no longer use GitHub, archive downloads, or a separate
-Vercel updater request.  The running WOWKIDS cloud agent receives one verified
-file at a time inside its normal /api/wowkids-device polling response — the
-same connection that already carries rating jobs reliably.
-
-Older bootstrap BAT files still call `vercel_update.py` as a Step 3 check.
-Keep this tiny script so those installers finish successfully instead of
-opening another TLS connection.
+WOWKIDS updates no longer open a separate HTTPS/Git/Vercel connection.
+The running cloud agent receives one small update file at a time inside the
+same /api/wowkids-device polling response that already works reliably on this
+PC. Keep this file so older BAT files can call it safely.
 """
 
 import argparse
@@ -19,12 +15,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--background", action="store_true")
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--ref", default="main")
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--ref",
+        default="main",
+        choices=("main", "stable-current", "stable-working-2026-09-22"),
+    )
+    args = parser.parse_args(argv)
 
-    # Intentionally no network access here.
-    if "--quiet" not in (argv or []):
-        print("Updates are handled automatically through the normal WOWKIDS job connection.")
+    if not args.quiet:
+        print(
+            "Updates are delivered automatically through the normal "
+            "Feedback Assistant polling connection."
+        )
     return 0
 
 
