@@ -44,8 +44,10 @@ STATUS_PATH = os.path.join(STATE_DIR, "agent_status.json")
 UPDATE_STATE_PATH = os.path.join(STATE_DIR, "poll_update_state.json")
 LOG_DIR = os.path.join(HERE, "logs")
 DEFAULT_BASE_URL = "https://feedback-assistant-alpha.vercel.app"
-POLL_IDLE_SECONDS = 15
-POLL_WAITING_SECONDS = 3
+# Queue responsiveness matters in class. Two seconds keeps backend load modest
+# while removing the old worst-case 15 second delay before a new job was seen.
+POLL_IDLE_SECONDS = 2
+POLL_WAITING_SECONDS = 1
 
 JOB_SCORE_FOR_CATEGORY = {
     "Making Skills": "making",
@@ -1350,26 +1352,54 @@ def run_forever():
             # Escape in an unrelated application. ESC/F10 is honored only once
             # an actual WOWKIDS job is active.
             try:
-                # Exit only between jobs. The existing watchdog relaunches us
-                # with fresh imports; never interrupt a student mid-rating.
-                if _source_version() != LOADED_VERSION:
-                    _save_status(state='restarting', message='Loading updated agent code')
+                # Exit only between jobs. While a poll-delivered update is
+                # incomplete, keep collecting its files and restart ONCE after
+                # the whole bundle arrives. The old behavior restarted after
+                # every runtime file, which could delay a freshly queued job by
+                # minutes during an update.
+                update_state = _read_update_state()
+                update_pending = bool(
+                    update_state.get("updateId")
+                    and update_state.get("installedId")
+                    != update_state.get("updateId")
+                )
+                if not update_pending and _source_version() != LOADED_VERSION:
+                    _save_status(
+                        state="restarting",
+                        message="Loading updated agent code",
+                    )
                     return 75
-                response = api.poll()
 
-                # Updates ride inside the same polling channel that already
-                # works reliably on this PC.
-                if _apply_agent_update(response.get("agentUpdate")):
+                response = api.poll()
+                update_payload = response.get("agentUpdate")
+
+                # Updates ride inside the same authenticated polling channel.
+                if _apply_agent_update(update_payload):
                     _save_status(
                         state="updating",
                         message="Applying Windows agent update",
                     )
-                    if _source_version() != LOADED_VERSION:
+                    after_update = _read_update_state()
+                    update_finished = bool(
+                        after_update.get("updateId")
+                        and after_update.get("installedId")
+                        == after_update.get("updateId")
+                    )
+                    if update_finished and _source_version() != LOADED_VERSION:
                         return 75
-                    # Non-runtime files (BATs/supervisor/helpers) do not affect
-                    # LOADED_VERSION. Poll again immediately so a full update
-                    # finishes in seconds instead of one file every idle cycle.
-                    time.sleep(0.20)
+                    # Fetch the next small file immediately; no 15-second idle
+                    # wait and no process restart between files.
+                    time.sleep(0.05)
+                    continue
+
+                if update_pending:
+                    # Never run a job against a partially installed source set.
+                    # A transient missing update payload is retried quickly.
+                    _save_status(
+                        state="updating",
+                        message="Waiting for remaining Windows agent update files",
+                    )
+                    time.sleep(0.50)
                     continue
 
                 device = response.get("device") or {}
@@ -1454,7 +1484,7 @@ def run_forever():
                         message=message,
                         traceback=trace[-4000:],
                     )
-                    time.sleep(5)
+                    time.sleep(1.0)
 
             except ApiError as exc:
                 _save_status(
