@@ -6,9 +6,9 @@ echo ============================================================
 echo WOWKIDS WINDOWS AGENT - NO-KEY REPAIR
 echo ============================================================
 echo.
-echo This keeps your existing pairing.
-echo Updates arrive automatically through the normal WOWKIDS connection.
-echo GitHub is NOT required on this PC.
+echo No GitHub download is required.
+echo Updates arrive automatically through the normal Feedback Assistant connection.
+echo Your saved pairing will NOT be changed.
 echo.
 
 set "PYEXE="
@@ -27,8 +27,8 @@ if not exist "libs\pywinauto" (
   if errorlevel 1 goto fail
 )
 
-echo Checking the agent files...
-%PYEXE% -m py_compile wowkids_cloud_agent.py wowkids_agent_supervisor.py repair_windows_agent.py pair_windows_agent.py class_controller.py humanlike_engine.py home_navigator.py performance_log.py rating_engine.py vercel_update.py
+echo Checking the installed agent files...
+%PYEXE% -m py_compile wowkids_cloud_agent.py wowkids_agent_supervisor.py repair_windows_agent.py pair_windows_agent.py class_controller.py humanlike_engine.py home_navigator.py performance_log.py rating_engine.py
 if errorlevel 1 goto fail
 
 %PYEXE% repair_windows_agent.py
