@@ -1022,13 +1022,20 @@ class HumanLikeRatingSession(_BaseSession):
             item for item in items
             if item.get("kind") == "review-action"
         ]
+        roster_titles = [
+            item for item in items
+            if item.get("kind") == "roster-title"
+        ]
         new_labels = int((signals or {}).get("new_roster_label_count") or 0)
         legacy_verified = bool(has_post_all and len(badges) >= 1)
-        redesigned_verified = bool(review_actions and new_labels >= 3)
+        redesigned_verified = bool(
+            (review_actions or roster_titles) and new_labels >= 3
+        )
         return {
             "has_post_all": has_post_all,
             "badge_count": len(badges),
             "review_action_count": len(review_actions),
+            "roster_title_count": len(roster_titles),
             "new_roster_label_count": new_labels,
             "items": items,
             # 2026-09-23 redesigned class pages no longer expose the old
