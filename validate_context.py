@@ -279,6 +279,12 @@ def _roster_visual_support(visible, screenshot_path, window_rect):
             # pill, unlike the "Reviews 7/11" counters on the Home class cards.
             supported = colours["purple"] >= 0.20
             kind = "review-action"
+        elif name == "students":
+            # The redesigned roster has an orange Students title directly
+            # above the table. This remains available even when every student
+            # is already rated and no Reviews action is present.
+            supported = colours["orange"] >= 0.025
+            kind = "roster-title"
         if supported:
             result.append({
                 "marker": marker,
@@ -331,6 +337,10 @@ def classify_live_page(visible, heading_doc_ids=None, screenshot_path=None,
         item for item in roster_visual
         if item["kind"] == "review-action"
     ]
+    roster_titles = [
+        item for item in roster_visual
+        if item["kind"] == "roster-title"
+    ]
     visible_names = {
         (node.get("name") or "").strip().casefold()
         for node in visible
@@ -344,7 +354,7 @@ def classify_live_page(visible, heading_doc_ids=None, screenshot_path=None,
     strong_roster = (
         (has_post_all and badge_count >= 2)
         or (
-            len(review_actions) >= 1
+            (len(review_actions) >= 1 or len(roster_titles) >= 1)
             and "students" in visible_names
             and new_roster_label_count >= 3
         )
@@ -376,8 +386,8 @@ def classify_live_page(visible, heading_doc_ids=None, screenshot_path=None,
                 badge_count
             )
         else:
-            reason = "new class roster visually verified ({} live Reviews action(s) + {} roster labels)".format(
-                len(review_actions), new_roster_label_count
+            reason = "new class roster visually verified ({} live Reviews action(s), {} live Students title(s), {} roster labels)".format(
+                len(review_actions), len(roster_titles), new_roster_label_count
             )
         return (
             "CLASS_ROSTER",
