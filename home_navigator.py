@@ -819,11 +819,27 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             key=lambda node: node["rect"]["top"],
             reverse=True,
         )
-        self._click_node(
-            candidates[0],
-            "bottom Home tab",
-            settle=0.18,
+        home_node = candidates[0]
+        home_rect = home_node["rect"]
+        home_point = (
+            home_rect["left"] + home_rect["width"] // 2,
+            home_rect["top"] + home_rect["height"] // 2,
         )
+        # The general page-content click gate excludes the bottom navigation.
+        # This separate gate is limited to the live, orange Home label there.
+        if not (
+            self._colour_support(home_node, "orange", 0.03)
+            and self.client_rect["left"] + 10 <= home_point[0]
+            < self.client_rect["left"] + self.client_rect["width"] // 3
+            and self.client_rect["top"] + self.client_rect["height"] - 90
+            <= home_point[1]
+            < self.client_rect["top"] + self.client_rect["height"] - 8
+        ):
+            raise RuntimeError("bottom Home tab lacks live rendered proof")
+        if abort_pressed():
+            raise RuntimeError("STOP pressed (F10)")
+        self.click_at(home_point)
+        time.sleep(0.18)
 
         deadline = time.monotonic() + float(timeout)
         attempt = 0
