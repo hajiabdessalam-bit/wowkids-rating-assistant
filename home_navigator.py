@@ -407,12 +407,18 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             return candidates[0][1]
         return None
 
-    def ensure_target_month(self, target_date, max_clicks=18):
+    def ensure_target_month(
+        self, target_date, max_clicks=18, initial_snap=None, initial_visible=None
+    ):
         target_month = (target_date.year, target_date.month)
         for attempt in range(max_clicks + 1):
-            snap, visible, state, reasons, _signals = self.live_snapshot(
-                "home_month_{:02d}".format(attempt)
-            )
+            if attempt == 0 and initial_snap is not None and initial_visible is not None:
+                snap, visible = initial_snap, initial_visible
+                state, reasons = "HOME", []
+            else:
+                snap, visible, state, reasons, _signals = self.live_snapshot(
+                    "home_month_{:02d}".format(attempt)
+                )
             current = self._calendar_month(visible)
             if current == target_month:
                 return snap, visible
@@ -441,20 +447,26 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
 
         raise RuntimeError("calendar did not reach the queued class month")
 
-    def open_target_date(self, target_date):
-        _snap, visible = self.ensure_target_month(target_date)
+    def open_target_date(
+        self, target_date, initial_snap=None, initial_visible=None
+    ):
+        _snap, visible = self.ensure_target_month(
+            target_date,
+            initial_snap=initial_snap,
+            initial_visible=initial_visible,
+        )
 
         day_node = self._find_day_node(visible, target_date)
         if day_node:
             point = self._click_node(
-                day_node, "calendar day {}".format(target_date.day), settle=0.55
+                day_node, "calendar day {}".format(target_date.day), settle=0.22
             )
         else:
             # UIA may omit individual day labels in some Chromium builds. The
             # month itself was verified, so use the demonstrated calendar grid.
             point = self._calendar_day_point(target_date)
             self._click_point(
-                point, "calendar day {}".format(target_date.day), settle=0.55
+                point, "calendar day {}".format(target_date.day), settle=0.22
             )
 
         # Do not continue unless the selected-date surface exposes the queued
@@ -467,7 +479,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             )
             if self._date_surface_has_target(visible, target_date):
                 return snap, visible, point
-            time.sleep(0.25)
+            time.sleep(0.08)
         raise RuntimeError("calendar day click did not open the queued date")
 
     def _new_date_surface_has_target(self, visible, target_date):
@@ -588,11 +600,17 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             unique[(rect["left"], rect["top"], rect["width"], rect["height"])] = node
         return list(unique.values())
 
-    def _seek_new_class_card(self, target_time, class_name, max_scrolls=8):
+    def _seek_new_class_card(
+        self, target_time, class_name, max_scrolls=8, initial_visible=None
+    ):
         for attempt in range(max_scrolls + 1):
-            _snap, visible, state, _reasons, _signals = self.live_snapshot(
-                "seek_class_card_{:02d}".format(attempt)
-            )
+            if attempt == 0 and initial_visible is not None:
+                visible = initial_visible
+                state = "HOME"
+            else:
+                _snap, visible, state, _reasons, _signals = self.live_snapshot(
+                    "seek_class_card_{:02d}".format(attempt)
+                )
             if state == "CLASS_ROSTER":
                 raise RuntimeError("class list changed to a roster during search")
             matches = self._matching_new_class_cards(
@@ -603,17 +621,27 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             if len(matches) > 1:
                 raise RuntimeError("multiple visible cards match queued time and class")
             if attempt < max_scrolls:
-                self._scroll(-3, settle=0.28)
+                self._scroll(-4, settle=0.13)
         raise RuntimeError(
             "queued class {} at {} was not found after bounded scrolling".format(
                 class_name, target_time
             )
         )
 
-    def expand_target_class(self, target_date, target_time, class_name):
-        snap, visible, _state, _reasons, _signals = self.live_snapshot(
-            "class_surface_before_open"
-        )
+    def expand_target_class(
+        self,
+        target_date,
+        target_time,
+        class_name,
+        initial_snap=None,
+        initial_visible=None,
+    ):
+        if initial_snap is not None and initial_visible is not None:
+            snap, visible = initial_snap, initial_visible
+        else:
+            snap, visible, _state, _reasons, _signals = self.live_snapshot(
+                "class_surface_before_open"
+            )
         legacy = self._popup_has_date(visible, target_date)
         modern = self._new_date_surface_has_target(visible, target_date)
         if not (legacy or modern):
@@ -625,7 +653,9 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         # calendar. Click the centre-right portion of the queued card row (the
         # human demo clicked the class-name area), then wait for the roster.
         if modern and not legacy:
-            candidate = self._seek_new_class_card(target_time, class_name)
+            candidate = self._seek_new_class_card(
+                target_time, class_name, initial_visible=visible
+            )
             rect = candidate["rect"]
             point = (
                 int(self.client_rect["left"] + self.client_rect["width"] * 0.62),
@@ -634,7 +664,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             self._click_point(
                 point,
                 "queued class card {}".format(target_time),
-                settle=0.35,
+                settle=0.16,
             )
 
             deadline = time.monotonic() + 8.0
@@ -648,7 +678,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
                 if state_after == "CLASS_ROSTER":
                     return after, visible_after, point
                 attempt += 1
-                time.sleep(0.20)
+                time.sleep(0.08)
             raise RuntimeError(
                 "queued class card was clicked but the redesigned roster did not open"
             )
@@ -662,7 +692,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         point = self._click_node(
             candidates[0],
             "queued class time {}".format(target_time),
-            settle=0.55,
+            settle=0.22,
         )
 
         # Expansion is verified by the appearance of student-like rows or the
@@ -676,7 +706,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
                 return after, visible_after, point
             if self._expanded_student_rows(visible_after, target_time):
                 return after, visible_after, point
-            time.sleep(0.25)
+            time.sleep(0.08)
         raise RuntimeError("queued class row did not expand")
 
     def _expanded_student_rows(self, visible, target_time):
@@ -763,7 +793,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             if attempt < max_scrolls:
                 # Human demonstration used one 3-notch downward burst. Use the
                 # same small bounded motion and re-check after every burst.
-                self._scroll(-3, settle=0.28)
+                self._scroll(-4, settle=0.13)
 
         raise RuntimeError("View comments was not found after bounded scrolling")
 
@@ -895,15 +925,27 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
                 if self._expanded_student_rows(visible, target_time):
                     return self.open_roster_from_expanded()
                 self.expand_target_class(
-                    target_date, target_time, class_name
+                    target_date,
+                    target_time,
+                    class_name,
+                    initial_snap=snap,
+                    initial_visible=visible,
                 )
                 return self.open_roster_from_expanded()
 
             month = self._calendar_month(visible)
             if state == "HOME" or month is not None:
-                self.open_target_date(target_date)
+                date_snap, date_visible, _point = self.open_target_date(
+                    target_date,
+                    initial_snap=snap,
+                    initial_visible=visible,
+                )
                 self.expand_target_class(
-                    target_date, target_time, class_name
+                    target_date,
+                    target_time,
+                    class_name,
+                    initial_snap=date_snap,
+                    initial_visible=date_visible,
                 )
                 return self.open_roster_from_expanded()
 
