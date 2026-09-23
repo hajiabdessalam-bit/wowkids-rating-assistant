@@ -326,7 +326,14 @@ def _live_roster_document_nodes(snap, signals, client_rect):
         if item.get("rect") and item.get("name")
     ]
     posts = [item for item in evidence if item.get("kind") == "post-all"]
-    if not posts:
+    review_actions = [
+        item for item in evidence if item.get("kind") == "review-action"
+    ]
+    roster_titles = [
+        item for item in evidence if item.get("kind") == "roster-title"
+    ]
+    anchors = posts or review_actions or roster_titles
+    if not anchors:
         return []
 
     nodes = snap["nodes"]
@@ -348,9 +355,9 @@ def _live_roster_document_nodes(snap, signals, client_rect):
         if not node.get("rect"):
             continue
         if not any(
-            norm(node.get("name")) == norm(post.get("name"))
-            and rect_close(node.get("rect"), post.get("rect"))
-            for post in posts
+            norm(node.get("name")) == norm(anchor.get("name"))
+            and rect_close(node.get("rect"), anchor.get("rect"))
+            for anchor in anchors
         ):
             continue
         doc = ctx.document_index_of(index, nodes, parents)
@@ -384,10 +391,20 @@ def _live_roster_document_nodes(snap, signals, client_rect):
             1 for item in matched
             if item.get("kind") in ("posted", "purple-badge", "grey-badge")
         )
-        if post_count < 1 or badge_count < 2:
+        review_count = sum(
+            1 for item in matched if item.get("kind") == "review-action"
+        )
+        roster_title_count = sum(
+            1 for item in matched if item.get("kind") == "roster-title"
+        )
+        legacy_ok = post_count >= 1 and badge_count >= 2
+        redesigned_ok = review_count >= 1 or roster_title_count >= 1
+        if not (legacy_ok or redesigned_ok):
             continue
 
-        top_limit = client_rect["top"] + min(230, client_rect["height"] // 3)
+        # The redesigned class header places date/time around y=235, lower
+        # than the old roster. Keep enough of the top card to read identity.
+        top_limit = client_rect["top"] + min(340, client_rect["height"] // 2)
         header = []
         for node in subtree:
             rect = node.get("rect")
@@ -408,6 +425,8 @@ def _live_roster_document_nodes(snap, signals, client_rect):
             "subtree": subtree,
             "score": len(matched),
             "badge_count": badge_count,
+            "review_count": review_count,
+            "roster_title_count": roster_title_count,
             "dates": dates,
             "times": times,
         })
@@ -416,14 +435,28 @@ def _live_roster_document_nodes(snap, signals, client_rect):
         return []
 
     scored.sort(
-        key=lambda item: (item["score"], item["badge_count"], item["doc"]),
+        key=lambda item: (
+            item["score"],
+            item["badge_count"] + item.get("review_count", 0)
+            + item.get("roster_title_count", 0),
+            item["doc"],
+        ),
         reverse=True,
     )
     best_score = scored[0]["score"]
-    best_badges = scored[0]["badge_count"]
+    best_activity = (
+        scored[0]["badge_count"]
+        + scored[0].get("review_count", 0)
+        + scored[0].get("roster_title_count", 0)
+    )
     tied = [
         item for item in scored
-        if item["score"] == best_score and item["badge_count"] == best_badges
+        if item["score"] == best_score
+        and (
+            item["badge_count"]
+            + item.get("review_count", 0)
+            + item.get("roster_title_count", 0)
+        ) == best_activity
     ]
     if len(tied) == 1:
         return tied[0]["subtree"]
@@ -471,7 +504,7 @@ def _roster_identity(nav, label="cloud_match"):
             "documentVerified": False,
         }
 
-    top_limit = nav.client_rect["top"] + min(230, nav.client_rect["height"] // 3)
+    top_limit = nav.client_rect["top"] + min(340, nav.client_rect["height"] // 2)
     texts = []
     for node in live_nodes:
         rect = node.get("rect")
