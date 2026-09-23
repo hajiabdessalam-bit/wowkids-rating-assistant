@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import datetime as dt
 import hashlib
+import base64
 import json
 import os
 import re
@@ -40,6 +41,7 @@ STATE_DIR = os.path.join(
 CONFIG_PATH = os.path.join(STATE_DIR, "device_config.json")
 LEGACY_CONFIG_PATH = os.path.join(HERE, "device_config.json")
 STATUS_PATH = os.path.join(STATE_DIR, "agent_status.json")
+UPDATE_STATE_PATH = os.path.join(STATE_DIR, "poll_update_state.json")
 LOG_DIR = os.path.join(HERE, "logs")
 DEFAULT_BASE_URL = "https://feedback-assistant-alpha.vercel.app"
 POLL_IDLE_SECONDS = 15
@@ -88,6 +90,86 @@ def _write_json(path, payload):
     os.replace(tmp, path)
 
 
+def _read_update_state():
+    try:
+        with open(UPDATE_STATE_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_agent_update(payload):
+    """Apply one small source file delivered inside the normal poll response."""
+    if not isinstance(payload, dict):
+        return False
+
+    update_id = str(payload.get("id") or "").strip()
+    path = str(payload.get("path") or "").strip().replace("\\", "/")
+    content_b64 = str(payload.get("contentB64") or "")
+    expected = str(payload.get("sha256") or "").strip().lower()
+    index = int(payload.get("index") or 0)
+    total = int(payload.get("total") or 0)
+
+    if not update_id or not path or not content_b64 or total < 1:
+        return False
+    if path.startswith("../") or "/../" in path or path.startswith("/"):
+        raise RuntimeError("unsafe poll-update path")
+
+    raw = base64.b64decode(content_b64.encode("ascii"))
+    actual = hashlib.sha256(raw).hexdigest()
+    if expected and actual != expected:
+        raise RuntimeError(
+            "poll-update checksum mismatch for {}".format(path)
+        )
+
+    target = os.path.join(HERE, *path.split("/"))
+    os.makedirs(os.path.dirname(target) or HERE, exist_ok=True)
+
+    same = False
+    try:
+        with open(target, "rb") as fh:
+            same = fh.read() == raw
+    except Exception:
+        pass
+
+    if not same:
+        backup_dir = os.path.join(
+            HERE,
+            "_poll_update_backups",
+            time.strftime("%Y%m%d_%H%M%S"),
+        )
+        if os.path.isfile(target):
+            backup_path = os.path.join(
+                backup_dir,
+                *path.split("/"),
+            )
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            try:
+                import shutil
+                shutil.copy2(target, backup_path)
+            except Exception:
+                pass
+
+        tmp = target + ".poll-update.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(raw)
+        os.replace(tmp, target)
+
+    state = _read_update_state()
+    state.update({
+        "updateId": update_id,
+        "nextIndex": index + 1,
+        "lastPath": path,
+        "updatedAt": _now(),
+    })
+    if index + 1 >= total:
+        state["installedId"] = update_id
+        state["nextIndex"] = total
+    _write_json(UPDATE_STATE_PATH, state)
+    return True
+
+
 def _read_config():
     os.makedirs(STATE_DIR, exist_ok=True)
 
@@ -125,10 +207,20 @@ class CloudApi:
 
     def request(self, method="GET", body=None, timeout=10):
         url = self.base_url + "/api/wowkids-device"
+        update_state = _read_update_state()
         headers = {
             "Accept": "application/json",
             "x-wowkids-device-token": self.token,
-            "User-Agent": "WOWKIDS-Rating-Assistant/1.0",
+            "User-Agent": "WOWKIDS-Rating-Assistant/2.0",
+            "x-wowkids-installed-update-id": str(
+                update_state.get("installedId") or ""
+            ),
+            "x-wowkids-update-id": str(
+                update_state.get("updateId") or ""
+            ),
+            "x-wowkids-update-next": str(
+                int(update_state.get("nextIndex") or 0)
+            ),
         }
         data = None
         if body is not None:
@@ -234,7 +326,14 @@ def _live_roster_document_nodes(snap, signals, client_rect):
         if item.get("rect") and item.get("name")
     ]
     posts = [item for item in evidence if item.get("kind") == "post-all"]
-    if not posts:
+    review_actions = [
+        item for item in evidence if item.get("kind") == "review-action"
+    ]
+    roster_titles = [
+        item for item in evidence if item.get("kind") == "roster-title"
+    ]
+    anchors = posts or review_actions or roster_titles
+    if not anchors:
         return []
 
     nodes = snap["nodes"]
@@ -256,9 +355,9 @@ def _live_roster_document_nodes(snap, signals, client_rect):
         if not node.get("rect"):
             continue
         if not any(
-            norm(node.get("name")) == norm(post.get("name"))
-            and rect_close(node.get("rect"), post.get("rect"))
-            for post in posts
+            norm(node.get("name")) == norm(anchor.get("name"))
+            and rect_close(node.get("rect"), anchor.get("rect"))
+            for anchor in anchors
         ):
             continue
         doc = ctx.document_index_of(index, nodes, parents)
@@ -292,10 +391,20 @@ def _live_roster_document_nodes(snap, signals, client_rect):
             1 for item in matched
             if item.get("kind") in ("posted", "purple-badge", "grey-badge")
         )
-        if post_count < 1 or badge_count < 2:
+        review_count = sum(
+            1 for item in matched if item.get("kind") == "review-action"
+        )
+        roster_title_count = sum(
+            1 for item in matched if item.get("kind") == "roster-title"
+        )
+        legacy_ok = post_count >= 1 and badge_count >= 2
+        redesigned_ok = review_count >= 1 or roster_title_count >= 1
+        if not (legacy_ok or redesigned_ok):
             continue
 
-        top_limit = client_rect["top"] + min(230, client_rect["height"] // 3)
+        # The redesigned class header places date/time around y=235, lower
+        # than the old roster. Keep enough of the top card to read identity.
+        top_limit = client_rect["top"] + min(340, client_rect["height"] // 2)
         header = []
         for node in subtree:
             rect = node.get("rect")
@@ -316,6 +425,8 @@ def _live_roster_document_nodes(snap, signals, client_rect):
             "subtree": subtree,
             "score": len(matched),
             "badge_count": badge_count,
+            "review_count": review_count,
+            "roster_title_count": roster_title_count,
             "dates": dates,
             "times": times,
         })
@@ -324,14 +435,28 @@ def _live_roster_document_nodes(snap, signals, client_rect):
         return []
 
     scored.sort(
-        key=lambda item: (item["score"], item["badge_count"], item["doc"]),
+        key=lambda item: (
+            item["score"],
+            item["badge_count"] + item.get("review_count", 0)
+            + item.get("roster_title_count", 0),
+            item["doc"],
+        ),
         reverse=True,
     )
     best_score = scored[0]["score"]
-    best_badges = scored[0]["badge_count"]
+    best_activity = (
+        scored[0]["badge_count"]
+        + scored[0].get("review_count", 0)
+        + scored[0].get("roster_title_count", 0)
+    )
     tied = [
         item for item in scored
-        if item["score"] == best_score and item["badge_count"] == best_badges
+        if item["score"] == best_score
+        and (
+            item["badge_count"]
+            + item.get("review_count", 0)
+            + item.get("roster_title_count", 0)
+        ) == best_activity
     ]
     if len(tied) == 1:
         return tied[0]["subtree"]
@@ -379,7 +504,7 @@ def _roster_identity(nav, label="cloud_match"):
             "documentVerified": False,
         }
 
-    top_limit = nav.client_rect["top"] + min(230, nav.client_rect["height"] // 3)
+    top_limit = nav.client_rect["top"] + min(340, nav.client_rect["height"] // 2)
     texts = []
     for node in live_nodes:
         rect = node.get("rect")
@@ -502,36 +627,98 @@ def _available_scores(item):
 
 
 def _current_rating_resume_match(jobs):
-    """Match an already-open assessment to one queued student, if unique.
+    """Resume safely from an assessment page at ANY vertical position.
 
-    This lets the coach re-queue after an interruption without manually
-    navigating back to Home/roster. We only resume when the live assessment is
-    screenshot-verified and exactly one unfinished queued student matches it.
+    A stopped rating can leave the form midway down, where the student/date
+    header is no longer visible and the normal page classifier may be UNKNOWN.
+    Normalize the assessment to the top first, then identify the live student,
+    date and class time before choosing a queued job.
+
+    Scrolling an unrelated HOME/roster page to its top is harmless and lets
+    the normal selector continue if this is not an assessment.
     """
     try:
         rater = HumanLikeRatingSession(raise_window=False)
-        snap = rater.snapshot("resume_probe")
+
+        # The key recovery behavior: always normalize the current mini-app view
+        # before trying to identify it. This exposes the student card and the
+        # lesson/date/time line shown at the top of every assessment.
+        rater._scroll_to_top()
+        snap = rater.snapshot("resume_probe_top")
+        nodes = snap["nodes"]
+        frames = [i for i, node in enumerate(nodes)
+                  if node.get("control_type") == "Document"
+                  and node.get("name") == "Page-Frame"]
+        if not frames:
+            return None
+        start = frames[-1]
+        depth = nodes[start].get("depth", 0)
+        page = []
+        for node in nodes[start + 1:]:
+            if node.get("depth", 0) <= depth:
+                break
+            page.append(node)
+        visible = rater._visible(page)
+
         state, _reasons, _signals = ctx.classify_live_page(
-            rater._visible(snap["nodes"]),
+            visible,
             None,
             snap["path"],
             rater.window_rect,
         )
-        if state != "RATING_FORM":
+
+        # Mid-rating pages can still classify UNKNOWN because the ability
+        # headings are below the fold. The assessment payload verifier is the
+        # stronger signal at the normalized top, so do not require
+        # state == RATING_FORM here.
+        page_texts = [
+            _normal_text(node.get("name"))
+            for node in visible
+            if _normal_text(node.get("name"))
+        ]
+        joined = " | ".join(page_texts)
+        has_assessment_marker = (
+            "课堂评价" in joined
+            or "in-class assessment" in joined.casefold()
+        )
+        if state != "RATING_FORM" and not has_assessment_marker:
             return None
     except Exception:
         return None
+
+    dates = sorted(set(re.findall(r"\b20\d{2}-\d{2}-\d{2}\b", joined)))
+    times = sorted(set(
+        _normal_time(match)
+        for match in re.findall(
+            r"\b\d{1,2}:\d{2}\s*[-–—~～]\s*\d{1,2}:\d{2}\b",
+            joined,
+        )
+    ))
 
     matches = []
     for job in jobs:
         if job.get("status") not in ("queued", "running"):
             continue
+
+        target_date = str(job.get("target_date") or "").strip()
+        target_time = _normal_time(job.get("class_time") or "")
+
+        # The screenshot the user showed exposes both values at the top of the
+        # lesson card. Use them to disambiguate same-name students/classes.
+        if target_date:
+            if len(dates) != 1 or dates[0] != target_date:
+                continue
+        if target_time:
+            if len(times) != 1 or times[0] != target_time:
+                continue
+
         progress = job.get("progress") or {}
         completed_ids = {
             str(item.get("studentId") or "")
             for item in progress.get("completed") or []
             if isinstance(item, dict)
         }
+
         payload = job.get("payload") or {}
         for item in payload.get("students") or []:
             student_id = str(item.get("studentId") or "")
@@ -555,7 +742,8 @@ def _current_rating_resume_match(jobs):
                     matches.append((job, item, name))
                     break
 
-    # Same live student must never silently choose between two classes/jobs.
+    # Never guess. Resume only when top-of-form identity gives one unique
+    # queued student/job combination.
     unique = []
     seen = set()
     for job, item, name in matches:
@@ -571,8 +759,9 @@ def _current_rating_resume_match(jobs):
     resumed = dict(job)
     resumed["_resumeStudentId"] = str(item.get("studentId") or "")
     resumed["_resumeStudentName"] = name
+    resumed["_resumeMatchedDate"] = dates[0] if len(dates) == 1 else ""
+    resumed["_resumeMatchedTime"] = times[0] if len(times) == 1 else ""
     return resumed
-
 
 
 
@@ -1167,6 +1356,22 @@ def run_forever():
                     _save_status(state='restarting', message='Loading updated agent code')
                     return 75
                 response = api.poll()
+
+                # Updates ride inside the same polling channel that already
+                # works reliably on this PC.
+                if _apply_agent_update(response.get("agentUpdate")):
+                    _save_status(
+                        state="updating",
+                        message="Applying Windows agent update",
+                    )
+                    if _source_version() != LOADED_VERSION:
+                        return 75
+                    # Non-runtime files (BATs/supervisor/helpers) do not affect
+                    # LOADED_VERSION. Poll again immediately so a full update
+                    # finishes in seconds instead of one file every idle cycle.
+                    time.sleep(0.20)
+                    continue
+
                 device = response.get("device") or {}
                 jobs = list(response.get("jobs") or [])
                 if not jobs and response.get("job"):

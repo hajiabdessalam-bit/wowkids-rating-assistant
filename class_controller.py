@@ -214,7 +214,21 @@ class RosterNavigator(HumanLikeRatingSession):
 
     def _roster_snapshot(self, label):
         snap = self.snapshot(label)
-        visible = self._visible(snap["nodes"])
+        nodes = snap["nodes"]
+        frames = [i for i, node in enumerate(nodes)
+                  if node.get("control_type") == "Document"
+                  and node.get("name") == "Page-Frame"]
+        if frames:
+            start = frames[-1]
+            depth = nodes[start]["depth"]
+            page = []
+            for node in nodes[start + 1:]:
+                if node.get("depth", 0) <= depth:
+                    break
+                page.append(node)
+            visible = self._visible(page)
+        else:
+            visible = self._visible(nodes)
         state, reasons, signals = ctx.classify_live_page(
             visible, None, snap["path"], self.window_rect
         )
@@ -272,6 +286,10 @@ class RosterNavigator(HumanLikeRatingSession):
             if name != wanted:
                 continue
             if wkcommon.rect_intersection_area(rect, self.client_rect) < 20:
+                continue
+            _x, cy = _centre(rect)
+            if not (self.client_rect["top"] + 90 <= cy
+                    < self.client_rect["top"] + self.client_rect["height"] - 85):
                 continue
             candidates.append(node)
         return candidates
@@ -412,14 +430,21 @@ class RosterNavigator(HumanLikeRatingSession):
             )
         )
         if not verified:
-            raise RuntimeError(
-                "not on a visually verified class roster while looking for {!r}".format(
-                    student
+            # The roster header scrolls out of view. Re-establish its class
+            # identity at the top before trusting any student row.
+            self._scroll_roster_top()
+            (
+                snap, visible, state, reasons, signals, roster, verified
+            ) = self._roster_snapshot("find_student_top_verified")
+            if not verified:
+                raise RuntimeError(
+                    "not on a visually verified class roster while looking for {!r}".format(
+                        student
+                    )
                 )
-            )
 
         match = self._match_student(visible, signals, student)
-        if match:
+        if match and match.get("status") != STATUS_UNKNOWN:
             match["snapshot"] = snap
             match["roster_evidence"] = roster
             return match
@@ -439,7 +464,10 @@ class RosterNavigator(HumanLikeRatingSession):
                     re.sub(r"[^A-Za-z0-9]+", "_", student)[:24], attempt
                 )
             )
-            if not verified:
+            # We started on a verified roster and have only scrolled since.
+            # Its header may now be above the viewport; keep searching while
+            # the live capture has not become another recognized page.
+            if not verified and state not in ("UNKNOWN",):
                 raise RuntimeError(
                     "not on a visually verified class roster while looking for {!r}".format(
                         student
@@ -447,7 +475,7 @@ class RosterNavigator(HumanLikeRatingSession):
                 )
 
             match = self._match_student(visible, signals, student)
-            if match:
+            if match and match.get("status") != STATUS_UNKNOWN:
                 match["snapshot"] = snap
                 match["roster_evidence"] = roster
                 return match
