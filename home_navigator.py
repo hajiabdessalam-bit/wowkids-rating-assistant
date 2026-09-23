@@ -121,7 +121,10 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
       * the queued class-time row;
       * the exact 'View comments' button.
 
-    The route was learned from the 2026-09-22 human demonstration.
+    Supports both the 2026-09-22 layout and the redesigned 2026-09-23
+    layout learned from a fresh human demonstration. In the redesign a
+    selected day shows class cards directly under the calendar and clicking
+    the queued class opens the roster immediately.
     """
 
     def live_snapshot(self, label):
@@ -196,6 +199,24 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             if (
                 name == "view comments"
                 and self._colour_support(node, "orange", 0.25)
+            ):
+                return True
+
+            # 2026-09-23 Home redesign: "View all courses" is a stable orange
+            # action on the rendered calendar page. Selected-date class cards
+            # use orange time text instead of the former purple popup bars.
+            if (
+                name == "view all courses"
+                and self._colour_support(node, "orange", 0.08)
+            ):
+                return True
+
+            if (
+                re.fullmatch(
+                    r"\d{2}:\d{2}-\d{2}:\d{2}",
+                    _norm_time(node.get("name")),
+                )
+                and self._colour_support(node, "orange", 0.05)
             ):
                 return True
 
@@ -336,16 +357,17 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         return _parse_visible_month(self._visible_names(visible))
 
     def _calendar_day_point(self, target_date):
-        """Geometry fallback calibrated from the recorded WOWKIDS calendar.
+        """Geometry fallback for the 2026-09-23 calendar redesign.
 
-        It is relative to the live client rectangle, so DPI/window placement do
-        not matter. We use this only after the displayed month is verified.
+        The primary path still prefers a live UIA day node. These fractions are
+        used only after the displayed month is verified and are calibrated from
+        the user's new-interface demonstration (544x1024 client).
         """
         row, column = _calendar_cell(target_date)
-        # Recorded calendar centres (544x1024 client): Sunday x≈86, first week
-        # y≈418, ~62 px column spacing and ~62 px row spacing.
-        x_fraction = 0.158 + column * 0.1145
-        y_fraction = 0.408 + row * 0.0605
+        # New calendar centres: Sunday x≈85, +66px per column; first visible
+        # week y≈498, +60px per row in the 544x1024 client.
+        x_fraction = 0.136 + column * 0.1213
+        y_fraction = 0.486 + row * 0.0590
         return (
             int(self.client_rect["left"] + self.client_rect["width"] * x_fraction),
             int(self.client_rect["top"] + self.client_rect["height"] * y_fraction),
@@ -354,10 +376,11 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
     def _month_arrow_point(self, direction):
         if direction not in (-1, 1):
             raise ValueError("direction must be -1 or +1")
-        x_fraction = 0.153 if direction < 0 else 0.847
+        # New month arrows sit beside "Sep 2026" around y≈404.
+        x_fraction = 0.112 if direction < 0 else 0.892
         return (
             int(self.client_rect["left"] + self.client_rect["width"] * x_fraction),
-            int(self.client_rect["top"] + self.client_rect["height"] * 0.263),
+            int(self.client_rect["top"] + self.client_rect["height"] * 0.395),
         )
 
     def _find_day_node(self, visible, target_date):
@@ -375,7 +398,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
             # Restrict to the recorded calendar region, avoiding unrelated
             # counters containing the same number.
             rel_y = (cy - self.client_rect["top"]) / max(1, self.client_rect["height"])
-            if not 0.34 <= rel_y <= 0.74:
+            if not 0.42 <= rel_y <= 0.78:
                 continue
             distance = abs(cx - expected[0]) + abs(cy - expected[1])
             candidates.append((distance, node))
@@ -434,16 +457,38 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
                 point, "calendar day {}".format(target_date.day), settle=0.55
             )
 
-        # Do not continue unless the opened popup exposes the queued date.
+        # Do not continue unless the selected-date surface exposes the queued
+        # date. This accepts both the legacy popup and the 2026-09-23 inline
+        # class-card list under the calendar.
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             snap, visible, _state, _reasons, _signals = self.live_snapshot(
-                "date_popup"
+                "date_surface"
             )
-            if self._popup_has_date(visible, target_date):
+            if self._date_surface_has_target(visible, target_date):
                 return snap, visible, point
             time.sleep(0.25)
         raise RuntimeError("calendar day click did not open the queued date")
+
+    def _new_date_surface_has_target(self, visible, target_date):
+        names = [_text(node.get("name")) for node in visible if _text(node.get("name"))]
+        month_short = calendar.month_abbr[target_date.month]
+        month_long = calendar.month_name[target_date.month]
+        pattern = re.compile(
+            r"\b(?:{}|{})\s+{}\b".format(
+                re.escape(month_short),
+                re.escape(month_long),
+                target_date.day,
+            ),
+            re.I,
+        )
+        return any(pattern.search(name) for name in names)
+
+    def _date_surface_has_target(self, visible, target_date):
+        return (
+            self._popup_has_date(visible, target_date)
+            or self._new_date_surface_has_target(visible, target_date)
+        )
 
     def _popup_has_date(self, visible, target_date):
         y = target_date.year
@@ -493,14 +538,120 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
         candidates.sort(key=lambda item: item[0])
         return [node for _area, node in candidates]
 
+
+    def _new_time_candidates(self, visible, target_time):
+        """Find the orange class-time row in the redesigned inline class list."""
+        wanted = _norm_time(target_time)
+        candidates = []
+        for node in visible:
+            if _norm_time(node.get("name")) != wanted:
+                continue
+            rect = node.get("rect")
+            if not rect or not _inside(rect, self.client_rect, margin=8):
+                continue
+            rel_y = (
+                rect["top"] + rect["height"] // 2 - self.client_rect["top"]
+            ) / max(1, self.client_rect["height"])
+            if not 0.28 <= rel_y <= 0.92:
+                continue
+            if not self._colour_support(node, "orange", 0.05):
+                continue
+            candidates.append((rect["top"], rect["width"] * rect["height"], node))
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return [node for _top, _area, node in candidates]
+
+    def _matching_new_class_cards(self, visible, target_time, class_name):
+        """Require the queued name on the same rendered row as its time."""
+        wanted = _norm(class_name)
+        matches = []
+        for time_node in self._new_time_candidates(visible, target_time):
+            rect = time_node["rect"]
+            centre_y = rect["top"] + rect["height"] // 2
+            if wanted:
+                same_row = [
+                    node for node in visible
+                    if wanted in _norm(node.get("name"))
+                    and node.get("rect")
+                    and _inside(node["rect"], self.client_rect, margin=8)
+                    and abs(node["rect"]["top"] + node["rect"]["height"] // 2
+                            - centre_y) <= 45
+                    and node["rect"]["left"] > rect["left"]
+                ]
+                if not same_row:
+                    continue
+            matches.append(time_node)
+        # Chromium can expose duplicate elements. Collapse identical geometry,
+        # but never choose between two distinct matching cards.
+        unique = {}
+        for node in matches:
+            rect = node["rect"]
+            unique[(rect["left"], rect["top"], rect["width"], rect["height"])] = node
+        return list(unique.values())
+
+    def _seek_new_class_card(self, target_time, class_name, max_scrolls=8):
+        for attempt in range(max_scrolls + 1):
+            _snap, visible, state, _reasons, _signals = self.live_snapshot(
+                "seek_class_card_{:02d}".format(attempt)
+            )
+            if state == "CLASS_ROSTER":
+                raise RuntimeError("class list changed to a roster during search")
+            matches = self._matching_new_class_cards(
+                visible, target_time, class_name
+            )
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise RuntimeError("multiple visible cards match queued time and class")
+            if attempt < max_scrolls:
+                self._scroll(-3, settle=0.28)
+        raise RuntimeError(
+            "queued class {} at {} was not found after bounded scrolling".format(
+                class_name, target_time
+            )
+        )
+
     def expand_target_class(self, target_date, target_time, class_name):
         snap, visible, _state, _reasons, _signals = self.live_snapshot(
-            "class_popup_before_expand"
+            "class_surface_before_open"
         )
-        if not self._popup_has_date(visible, target_date):
-            raise RuntimeError("the open class popup is for a different date")
-        if not self._class_family_present(visible, class_name):
+        legacy = self._popup_has_date(visible, target_date)
+        modern = self._new_date_surface_has_target(visible, target_date)
+        if not (legacy or modern):
+            raise RuntimeError("the open class surface is for a different date")
+        if legacy and not self._class_family_present(visible, class_name):
             raise RuntimeError("queued WOWKIDS class name is not visible on this date")
+
+        # New interface: class cards are already visible directly below the
+        # calendar. Click the centre-right portion of the queued card row (the
+        # human demo clicked the class-name area), then wait for the roster.
+        if modern and not legacy:
+            candidate = self._seek_new_class_card(target_time, class_name)
+            rect = candidate["rect"]
+            point = (
+                int(self.client_rect["left"] + self.client_rect["width"] * 0.62),
+                int(rect["top"] + rect["height"] // 2),
+            )
+            self._click_point(
+                point,
+                "queued class card {}".format(target_time),
+                settle=0.35,
+            )
+
+            deadline = time.monotonic() + 8.0
+            attempt = 0
+            while time.monotonic() < deadline:
+                after, visible_after, state_after, reasons_after, signals_after = (
+                    self.live_snapshot(
+                        "new_class_open_{:02d}".format(attempt)
+                    )
+                )
+                if state_after == "CLASS_ROSTER":
+                    return after, visible_after, point
+                attempt += 1
+                time.sleep(0.20)
+            raise RuntimeError(
+                "queued class card was clicked but the redesigned roster did not open"
+            )
 
         candidates = self._time_candidates(visible, target_time)
         if not candidates:
@@ -722,7 +873,7 @@ class WowkidsHomeNavigator(HumanLikeRatingSession):
                     "signals": signals,
                 }
 
-            if self._popup_has_date(visible, target_date):
+            if self._date_surface_has_target(visible, target_date):
                 if self._find_view_comments(visible):
                     return self.open_roster_from_expanded()
                 if self._expanded_student_rows(visible, target_time):
