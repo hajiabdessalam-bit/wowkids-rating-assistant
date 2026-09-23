@@ -471,16 +471,27 @@ def _live_roster_document_nodes(snap, signals, client_rect):
 
     return []
 
-def _roster_identity(nav, label="cloud_match"):
-    (
-        snap,
-        _visible,
-        state,
-        reasons,
-        signals,
-        roster,
-        verified,
-    ) = nav._roster_snapshot(label)
+def _roster_identity(nav, label="cloud_match", prefetched=None):
+    if prefetched is None:
+        (
+            snap,
+            _visible,
+            state,
+            reasons,
+            signals,
+            roster,
+            verified,
+        ) = nav._roster_snapshot(label)
+    else:
+        (
+            snap,
+            _visible,
+            state,
+            reasons,
+            signals,
+            roster,
+            verified,
+        ) = prefetched
 
     if not verified:
         return {
@@ -585,17 +596,23 @@ def _job_student_name(item):
     return str(item.get("name") or item.get("cn") or "").strip()
 
 
-def _find_job_student(nav, item):
+def _find_job_student(nav, item, prefetched=None):
     names = []
     for value in (item.get("name"), item.get("cn")):
         text = str(value or "").strip()
         if text and text not in names:
             names.append(text)
 
-    for name in names:
-        match = nav.find_student(name)
+    for index, name in enumerate(names):
+        match = nav.find_student(
+            name,
+            prefetched=prefetched if index == 0 else None,
+        )
         if match:
             return name, match
+        # A failed first-name search may have scrolled the roster, so never
+        # reuse the old snapshot for an alternate Chinese/English name.
+        prefetched = None
     return None, None
 
 
@@ -1051,16 +1068,26 @@ def process_job(api, job):
                 ),
             )
         else:
+            roster_prefetched = None
             with perf.phase("roster_ready"):
                 nav = RosterNavigator(raise_window=False)
-                nav.wait_for_roster(timeout=12.0)
-                matched, reason = _matches_job(_roster_identity(nav), job)
+                roster_prefetched = nav.wait_for_roster(timeout=8.0)
+                identity = _roster_identity(
+                    nav,
+                    prefetched=roster_prefetched,
+                )
+                matched, reason = _matches_job(identity, job)
                 if not matched:
                     # Do not rate a student if the user navigated away to another class.
                     nav, _identity = wait_for_matching_roster(api, job)
+                    roster_prefetched = None
 
             with perf.phase("student_lookup"):
-                matched_name, match = _find_job_student(nav, item)
+                matched_name, match = _find_job_student(
+                    nav,
+                    item,
+                    prefetched=roster_prefetched,
+                )
             if not match:
                 skipped_item = {
                     "studentId": student_id,
@@ -1165,9 +1192,13 @@ def process_job(api, job):
 
         with perf.phase("return_to_roster"):
             nav_after = RosterNavigator(raise_window=False)
-            nav_after.wait_for_roster(timeout=15.0)
+            roster_after = nav_after.wait_for_roster(timeout=10.0)
             still_matches, why = _matches_job(
-                _roster_identity(nav_after), job
+                _roster_identity(
+                    nav_after,
+                    prefetched=roster_after,
+                ),
+                job,
             )
         if not still_matches:
             raise RuntimeError(
