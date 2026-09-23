@@ -280,6 +280,58 @@ class RosterNavigator(HumanLikeRatingSession):
         candidates = self._student_candidates(visible, student)
         evidence = (signals or {}).get("roster_visual_support", []) or []
 
+        # 2026-09-23 redesign: a student who still needs a rating has a solid
+        # purple Reviews button in the same table row. A completed student has
+        # a purple checkmark instead. Match the Reviews action by vertical row,
+        # not by fixed coordinates, so different name/avatar sizes are safe.
+        review_actions = [
+            item for item in evidence
+            if item.get("kind") == "review-action" and item.get("rect")
+        ]
+        if candidates and review_actions:
+            new_matches = []
+            for node in candidates:
+                rect = node["rect"]
+                _cx, cy = _centre(rect)
+                for item in review_actions:
+                    rrect = item["rect"]
+                    _rx, ry = _centre(rrect)
+                    vertical = abs(cy - ry)
+                    if vertical <= 42 and rrect["left"] > rect["left"]:
+                        new_matches.append(
+                            (
+                                vertical,
+                                node,
+                                item,
+                            )
+                        )
+            new_matches.sort(key=lambda row: row[0])
+            if new_matches:
+                _distance, node, item = new_matches[0]
+                return {
+                    "node": node,
+                    "status": STATUS_NOT_RATING,
+                    "status_item": item,
+                    "action_rect": item.get("rect"),
+                    "roster_style": "2026-redesign",
+                }
+
+            # If this is a verified redesigned roster and the requested
+            # student's row is visible but has no aligned Reviews action,
+            # treat it as already rated. This is deliberately conservative:
+            # we skip rather than clicking an ambiguous checkmark/student row.
+            if (
+                len(candidates) == 1
+                and int((signals or {}).get("new_roster_label_count") or 0) >= 3
+            ):
+                return {
+                    "node": candidates[0],
+                    "status": STATUS_RATED,
+                    "status_item": None,
+                    "action_rect": None,
+                    "roster_style": "2026-redesign",
+                }
+
         status_items = []
         for item in evidence:
             status = self._status_name(item)
@@ -448,7 +500,66 @@ class RosterNavigator(HumanLikeRatingSession):
             return {"opened": False, "skip": True, "reason": "already Rated"}
         if match["status"] != STATUS_NOT_RATING:
             raise RuntimeError(
-                "{} status could not be verified as 'Not rateing'".format(student)
+                "{} status could not be verified as needing a rating".format(student)
+            )
+
+        # New roster: click only the student's screenshot-verified purple
+        # Reviews action. Never click the Photos/Sign-in controls or a generic
+        # row point.
+        action_rect = match.get("action_rect")
+        if action_rect:
+            point = _centre(action_rect)
+            bottom_nav_top = (
+                self.client_rect["top"] + self.client_rect["height"] - 70
+            )
+            if not (
+                self.client_rect["left"] + 20 <= point[0]
+                < self.client_rect["left"] + self.client_rect["width"] - 20
+                and self.client_rect["top"] + 90 <= point[1] < bottom_nav_top
+            ):
+                raise RuntimeError(
+                    "{} Reviews action is outside the safe viewport".format(student)
+                )
+
+            self.click_at(point)
+            deadline = time.monotonic() + 5.0
+            attempt = 0
+            while time.monotonic() < deadline:
+                time.sleep(0.12)
+                attempt += 1
+                after = self.snapshot(
+                    "opened_reviews_{}_{}".format(
+                        re.sub(r"[^A-Za-z0-9]+", "_", student)[:20],
+                        attempt,
+                    )
+                )
+                if self._assessment_visible(after):
+                    return {
+                        "opened": True,
+                        "skip": False,
+                        "point": list(point),
+                        "snapshot": after["path"],
+                        "via": "Reviews",
+                    }
+
+                visible_after = self._visible(after["nodes"])
+                state, _reasons, signals_after = ctx.classify_live_page(
+                    visible_after, None, after["path"], self.window_rect
+                )
+                roster_after = self._live_roster_evidence(signals_after)
+                if state != "CLASS_ROSTER" and not roster_after["verified"]:
+                    return {
+                        "opened": True,
+                        "skip": False,
+                        "point": list(point),
+                        "snapshot": after["path"],
+                        "via": "Reviews",
+                    }
+
+            raise RuntimeError(
+                "{} Reviews button was clicked but the assessment did not open".format(
+                    student
+                )
             )
 
         snap = match["snapshot"]
